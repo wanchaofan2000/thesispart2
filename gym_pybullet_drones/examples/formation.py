@@ -49,7 +49,7 @@ DEFAULT_USER_DEBUG_GUI = False
 DEFAULT_OBSTACLES = True
 DEFAULT_SIMULATION_FREQ_HZ = 240
 DEFAULT_CONTROL_FREQ_HZ = 48
-DEFAULT_DURATION_SEC = 10
+DEFAULT_DURATION_SEC = 20
 DEFAULT_OUTPUT_FOLDER = 'results'
 DEFAULT_COLAB = False
 
@@ -185,7 +185,7 @@ def run(
                 acc_z = P_Z * z_err + D_Z * z_dot_err + I_Z * z_integrals[j]
 
                 # 合成 target_acc
-                target_acc = np.array([0, 0, acc_z]) 
+                target_acc = np.array([acc[0], acc[1], acc_z]) 
                 action[j, :], _ = followerctrl[j-1].computeControl(
                     control_timestep=env.CTRL_TIMESTEP,
                     cur_pos=obs[j][0:3],

@@ -84,18 +84,18 @@ class AccelerationControl(BaseControl):
         Converts target acceleration and yaw into thrust magnitude and target attitude.
         """
         cur_rotation = np.array(p.getMatrixFromQuaternion(cur_quat)).reshape(3, 3)
-        target_thrust = target_acc + np.array([0, 0, self.GRAVITY])
+        target_force = self._getURDFParameter('m') * target_acc
+        target_thrust = target_force + np.array([0, 0, self.GRAVITY])
         scalar_thrust = max(0., np.dot(target_thrust, cur_rotation[:,2]))
         thrust = (math.sqrt(scalar_thrust / (4 * self.KF)) - self.PWM2RPM_CONST) / self.PWM2RPM_SCALE
 
-        z_b = target_thrust / np.linalg.norm(target_thrust)
-        x_c = np.array([math.cos(target_yaw), math.sin(target_yaw), 0])
-        y_b = np.cross(z_b, x_c)
-        y_b /= np.linalg.norm(y_b)
-        x_b = np.cross(y_b, z_b)
-        R_target = np.vstack([x_b, y_b, z_b]).T
-        target_euler = Rotation.from_matrix(R_target).as_euler('XYZ', degrees=False)
-
+        target_z_ax = target_thrust / np.linalg.norm(target_thrust)
+        target_x_c = np.array([math.cos(target_yaw), math.sin(target_yaw), 0])
+        target_y_ax = np.cross(target_z_ax, target_x_c) / np.linalg.norm(np.cross(target_z_ax, target_x_c))
+        target_x_ax = np.cross(target_y_ax, target_z_ax)
+        target_rotation = (np.vstack([target_x_ax, target_y_ax, target_z_ax])).transpose()
+        #### Target rotation #######################################
+        target_euler = (Rotation.from_matrix(target_rotation)).as_euler('XYZ', degrees=False)
         return thrust, target_euler
 
     def _dslPIDAttitudeControl(self,
