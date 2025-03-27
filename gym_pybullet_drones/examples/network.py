@@ -82,17 +82,6 @@ class Actor_GNN(nn.Module):
     def load_network(self, filename):
         self.load_state_dict(torch.load(filename))
     
-class Critic_GNN(nn.Module):
-    def __init__(self, input_size, embedding_size, output_size):
-        super().__init__()
-        self.self_encoder_1 = nn.Linear(input_size*2, 32)
-        self.self_encoder_2 = nn.Linear(32, embedding_size)
-        self.neighbor_encoder_1 = nn.Linear(input_size, 32)
-        self.neighbor_encoder_2 = nn.Linear(32, embedding_size)
-
-        self.linear1 = nn.Linear(embedding_size*2 + param.action_dim, 64)
-        self.linear2 = nn.Linear(64, 16)
-        self.linear3 = nn.Linear(16, output_size)
         
     def forward(self, s, a):
         x1 = s[0:1, :]
