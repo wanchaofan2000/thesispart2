@@ -1,17 +1,6 @@
-"""Script demonstrating the joint use of simulation and control.
+"""
 
-The simulation is run by a `CtrlAviary` environment.
-The control is given by the PID implementation in `DSLPIDControl`.
-
-Example
--------
-In a terminal, run as:
-
-    $ python pid.py
-
-Notes
------
-Swith two drones' postions
+目前版本已经加了收缩因子，但是加入后因为判断增加会明显降低仿真速度
 
 """
 import os
@@ -28,6 +17,7 @@ import sys
 new_path = 'C:\deeprealm\python_robotic\gym-pybullet-drones'
 sys.path.append(new_path)
 from scipy.spatial.distance import pdist
+from scipy.spatial.transform import Rotation as R
 
 from gym_pybullet_drones.utils.enums import DroneModel, Physics
 from gym_pybullet_drones.envs.CtrlAviary import CtrlAviary
@@ -35,8 +25,76 @@ from gym_pybullet_drones.control.DSLPIDControl import DSLPIDControl
 from gym_pybullet_drones.utils.Logger1 import Logger
 from gym_pybullet_drones.utils.utils import sync, str2bool
 
+def generate_path_library(
+    arc_lengths=[1],
+    arc_radii=[np.inf, 78.0, 36.0, 20.0, 12.0, 8.0, 6.0, 4.0, 3.0],
+    delta_angle_deg=30
+):
+    base_paths = []
+
+    for radius in arc_radii:
+        for length in arc_lengths:
+            if math.isinf(radius):
+                x = np.linspace(0, length, 10)
+                y = np.zeros_like(x)
+                z = np.zeros_like(x)
+                path = np.stack([x, y, z], axis=1)
+                base_paths.append(path)
+            else:
+                theta_max = length / radius
+                thetas = np.linspace(0, theta_max, 10)
+                x = radius * np.sin(thetas)
+                y = radius * (1 - np.cos(thetas))
+                z = np.zeros_like(thetas)
+                arc = np.stack([x, y, z], axis=1)
+
+                for angle in range(0, 360, delta_angle_deg):
+                    rot = R.from_euler('x', angle, degrees=True).as_matrix()
+                    rotated = (rot @ arc.T).T
+                    base_paths.append(rotated)
+
+    # 为每条路径扩展k维度（如 channel：0.9, 1.0, 1.1）
+    k_values = [0.9, 1.0, 1.1]
+    full_library = []
+    for path in base_paths:
+        for k in k_values:
+            full_library.append({
+                'path': path.copy(),
+                'k': k
+            })
+
+    return full_library
+
+path_library = generate_path_library()
+
+def compute_aligned_endpoints(current_pos, current_vel, path):
+    """
+    输入：当前位置 current_pos、当前速度 current_vel、路径原语库 path_library
+    输出：所有对齐并平移后的轨迹终点位置组成的 endpoints 数组
+    """
+    v_norm = np.linalg.norm(current_vel)
+    v_dir = np.array([1.0, 0.0, 0.0]) if v_norm < 1e-6 else current_vel / v_norm
+
+    x_axis = np.array([1.0, 0.0, 0.0])
+
+    if np.allclose(v_dir, x_axis):
+        rot_matrix = np.eye(3)
+    else:
+        axis = np.cross(x_axis, v_dir)
+        angle = np.arccos(np.clip(np.dot(x_axis, v_dir), -1.0, 1.0))
+        axis /= np.linalg.norm(axis)
+        rot_matrix = R.from_rotvec(angle * axis).as_matrix()
+
+    endpoint = np.array([
+        (rot_matrix @ path.T).T[-1] + current_pos
+    ])
+
+    return endpoint
+
+paths = generate_path_library()
+
 DEFAULT_DRONES = DroneModel("cf2x")
-DEFAULT_NUM_DRONES = 6
+DEFAULT_NUM_DRONES = 2
 DEFAULT_PHYSICS = Physics("pyb")
 DEFAULT_GUI = True
 DEFAULT_RECORD_VISION = False
@@ -45,13 +103,13 @@ DEFAULT_USER_DEBUG_GUI = False
 DEFAULT_OBSTACLES = True
 DEFAULT_SIMULATION_FREQ_HZ = 240
 DEFAULT_CONTROL_FREQ_HZ = 48
-DEFAULT_DURATION_SEC = 5
+DEFAULT_DURATION_SEC = 10
 DEFAULT_OUTPUT_FOLDER = 'results'
 DEFAULT_COLAB = False
 
 def run(
         drone=DEFAULT_DRONES,
-        num_drones=6,
+        num_drones=2,
         physics=DEFAULT_PHYSICS,
         gui=DEFAULT_GUI,
         record_video=DEFAULT_RECORD_VISION,
@@ -66,24 +124,14 @@ def run(
         ):
     #### Initialize the simulation #############################
     INIT_XYZS = np.array([
-        [4, 4, 1], [-4, -4, 2],
-        [5.2, 5.2, 1], [2.8, 2.8, 1],
-        [-2.8, -2.8, 2], [-5.2, -5.2, 2]
+        [4, 4, 1], [-4, -4, 1.1]
     ])
     INIT_RPYS = np.array([[0, 0,  0] for i in range(num_drones)])
-    FORMATION_OFFSETS = np.array([
-        [0, 0, 0],
-        [1.2, 1.2, 0],
-        [-1.2, -1.2, 0]
-    ])
 
     TARGET_POS_A = np.array([-4, -4, 1])
     TARGET_POS_B = np.array([4, 4, 1])
     TARGET_POS = np.vstack([
-        TARGET_POS_A + FORMATION_OFFSETS[0], TARGET_POS_B + FORMATION_OFFSETS[0],
-        TARGET_POS_A + FORMATION_OFFSETS[1], TARGET_POS_A + FORMATION_OFFSETS[2],
-        TARGET_POS_B + FORMATION_OFFSETS[1], TARGET_POS_B + FORMATION_OFFSETS[2]
-    ])
+        TARGET_POS_A , TARGET_POS_B])
 
 
     #### Debug trajectory ######################################
@@ -142,80 +190,75 @@ def run(
     START = time.time()
     for i in range(0, int(duration_sec*env.CTRL_FREQ)):
 
-        #### Make it rain rubber ducks #############################
-        # if i/env.SIM_FREQ>5 and i%10==0 and i/env.SIM_FREQ<10: p.loadURDF("duck_vhacd.urdf", [0+random.gauss(0, 0.3),-0.5+random.gauss(0, 0.3),3], p.getQuaternionFromEuler([random.randint(0,360),random.randint(0,360),random.randint(0,360)]), physicsClientId=PYB_CLIENT)
-
         #### Step the simulation ###################################
         obs, reward, terminated, truncated, info = env.step(action)
-        leader_num = 2
 
-        drone_positions = np.array([obs[i][:3] for i in range(leader_num)])
-        distances = pdist(drone_positions, metric='euclidean')
+        positions = np.array([obs[i][:3] for i in range(num_drones)])
+        distances = pdist(positions, metric='euclidean')
         min_distance = np.min(distances)
+        best_goals = np.zeros((num_drones, 3))
 
-        step_size = 2  # 目标点步进距离
+        lambda_g = 1.0     # 靠近目标的代价系数
+        lambda_c = 10.0    # 碰撞代价权重（应远大于 lambda_g）
+        d_safe = 1.2      # 安全半径
+        beta = -2        # 距离过近时惩罚指数的陡峭度
 
-        # 26个方向向量
-        possible_directions = np.array([
-            [dx, dy, dz] for dx in [-1, 0, 1] for dy in [-1, 0, 1] for dz in [-1, 0, 1] if (dx, dy, dz) != (0, 0, 0)
-        ])
-        leader_indices = [0, 1]
-        new_target_pos = np.zeros((num_drones, 3))
+        for drone in range(num_drones):
+            current_pos = obs[drone][:3]
+            current_vel = obs[drone][10:13]
+            target_pos = TARGET_POS[drone]
+            direction_to_target = target_pos - current_pos
+            distance_to_target = np.linalg.norm(direction_to_target)
+            t_now = i * env.CTRL_TIMESTEP
 
-        leader_follower_map = {
-            0: [2, 3],  # 0 号 leader 控制 2,3
-            1: [4, 5]   # 1 号 leader 控制 4,5
-        }
-
-        for leader in leader_indices:
-            current_pos = obs[leader][:3]  # 当前位置
-            target_pos = TARGET_POS[leader]  # 目标点
-            v_current = obs[leader][10:13]  # 当前速度
-
-            if min_distance > 2:
-                # 沿目标方向前进 0.5 个单位
-                direction = target_pos - current_pos
-                direction_norm = np.linalg.norm(direction)  # 计算模长
-
-                if direction_norm > step_size:
-                    direction_unit = direction / direction_norm  # 归一化方向
-                    new_target_pos[leader] = np.array(current_pos) + direction_unit * step_size
-                else:
-                    new_target_pos[leader] = target_pos
+            # 如果距离足够近，直接目标点控制
+            if distance_to_target < 0.5:
+                best_goals[drone] = target_pos
             else:
-                # 选择最安全的速度方向
-                best_velocity = None
-                max_min_distance = -np.inf  # 记录最佳方向的最小距离
-                step_time = 1 / env.CTRL_FREQ  # 时间步长
-                acceleration = 12
-
-                for direction in possible_directions:
-                    a_vec = acceleration * direction / np.linalg.norm(direction)  # 归一化加速度
-                    v_new = v_current + a_vec * step_time  # 计算新速度
-                    predicted_position = current_pos + v_new * step_time  # 预测下一步位置
-
-                    # 计算新位置与其他无人机的最小距离
-                    temp_positions = drone_positions.copy()
-                    temp_positions[leader] = predicted_position  # 只更新当前无人机的位置
-                    new_distances = pdist(temp_positions, metric='euclidean')
-                    new_min_distance = np.min(new_distances)
-
-                    # 选择最安全的方向
-                    if new_min_distance > max_min_distance:
-                        max_min_distance = new_min_distance
-                        best_velocity = v_new
-
-                # 沿最优速度方向前进 0.5 个单位
-                if best_velocity is not None:
-                    best_velocity_dir = best_velocity / np.linalg.norm(best_velocity) if np.linalg.norm(best_velocity) > 0 else np.zeros(3)
-                    new_target_pos[leader] = current_pos + best_velocity_dir * step_size
+                # 判断当前时间是否处于初始化阶段（如0.4秒前）
+                if t_now < 0.4:
+                    align_dir = direction_to_target / np.linalg.norm(direction_to_target)
                 else:
-                    new_target_pos[leader] = current_pos  # 如果没有找到合适的方向，则保持当前位置
-                
-            for idx, follower_id in enumerate(leader_follower_map[leader]):
-                new_target_pos[follower_id] = np.array(new_target_pos[leader]) + FORMATION_OFFSETS[idx + 1]
+                    v_norm = np.linalg.norm(current_vel)
 
-        print(new_target_pos)
+                    align_dir = current_vel / v_norm
+
+                endpoints = []
+                goal_dists = []
+                min_dists = []
+                shrink_penalties = []
+                collision_penalties = []
+                total_costs = []
+                others = np.delete(positions, drone, axis=0)
+                for p in path_library:
+                    k = p['k']
+                    path = p['path']
+                    endpoint = compute_aligned_endpoints(current_pos, align_dir, path)
+                    endpoints.append(endpoint)
+                    goal_dists.append(np.linalg.norm(endpoint - target_pos))
+                    # 最近他人距离
+                    dist_to_others = np.min(np.linalg.norm(endpoint - others, axis=1))
+                    min_dists.append(dist_to_others)
+
+                    # 非线性避碰代价（带收缩因子k）
+                    k_d_safe = k * d_safe
+                    if dist_to_others < k_d_safe:
+                        collision_penalty = np.exp(-beta * (dist_to_others - k_d_safe)**2)
+                    else:
+                        collision_penalty = 0.0
+                    collision_penalties.append(collision_penalty)
+
+                    # 收缩惩罚
+                    gamma = 1
+                    shrink_penalty = np.exp(gamma * (k - 1)**2)
+                    shrink_penalties.append(shrink_penalty)
+
+                    total_costs.append(lambda_g * goal_dists[-1] + lambda_c * collision_penalty + shrink_penalty)
+
+                    best_idx = np.argmin(total_costs)
+                best_goal = endpoints[best_idx]
+                best_k = path_library[best_idx]['k']
+                best_goals[drone] = best_goal
 
 
             # 计算控制
@@ -223,7 +266,7 @@ def run(
             action[j, :], _, _ = ctrl[j].computeControlFromState(
                 control_timestep=env.CTRL_TIMESTEP,
                 state=obs[j],
-                target_pos=new_target_pos[j],  # 设定新的目标点
+                target_pos=best_goals[j],  # 设定新的目标点
                 target_rpy=INIT_RPYS[j, :]
             )
 
@@ -232,7 +275,7 @@ def run(
                 drone=j,
                 timestamp=i/env.CTRL_FREQ,
                 state=obs[j],
-                control=np.hstack([new_target_pos[j], INIT_RPYS[j, :], np.zeros(6)]),
+                control=np.hstack([best_goals[j], INIT_RPYS[j, :], np.zeros(6)]),
             )
 
         #### Printout ##############################################

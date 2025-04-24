@@ -11,8 +11,7 @@ In a terminal, run as:
 
 Notes
 -----
-The drones move, at different altitudes, along cicular trajectories 
-in the X-Y plane, around point (0, -.3).
+Swith two drones' postions
 
 """
 import os
@@ -28,9 +27,7 @@ import matplotlib.pyplot as plt
 import sys
 new_path = 'C:\deeprealm\python_robotic\gym-pybullet-drones'
 sys.path.append(new_path)
-from network import Actor_GNN
-import torch
-from param import *
+from scipy.spatial.distance import pdist
 
 from gym_pybullet_drones.utils.enums import DroneModel, Physics
 from gym_pybullet_drones.envs.CtrlAviary import CtrlAviary
@@ -40,7 +37,7 @@ from gym_pybullet_drones.utils.Logger1 import Logger
 from gym_pybullet_drones.utils.utils import sync, str2bool
 
 DEFAULT_DRONES = DroneModel("cf2x")
-DEFAULT_NUM_DRONES = 3
+DEFAULT_NUM_DRONES = 6
 DEFAULT_PHYSICS = Physics("pyb")
 DEFAULT_GUI = True
 DEFAULT_RECORD_VISION = False
@@ -49,46 +46,13 @@ DEFAULT_USER_DEBUG_GUI = False
 DEFAULT_OBSTACLES = True
 DEFAULT_SIMULATION_FREQ_HZ = 240
 DEFAULT_CONTROL_FREQ_HZ = 48
-DEFAULT_DURATION_SEC = 20
+DEFAULT_DURATION_SEC = 25
 DEFAULT_OUTPUT_FOLDER = 'results'
 DEFAULT_COLAB = False
 
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-actor = Actor_GNN(state_dim, 16 ,action_dim).to(device)
-current_dir = os.path.dirname(os.path.abspath(__file__))
-model_path = os.path.join(current_dir, "models", "actor_gnn_32drones_1.pkl")
-actor.load_network(model_path)
-
-def get_gnn_state(obs_all, i, leader_id=0, Rc=5, init_obs_all=None):
-    pos_i, vel_i = obs_all[i][0:2], obs_all[i][10:12]
-    pos_0, vel_0 = obs_all[leader_id][0:2], obs_all[leader_id][10:12]
-
-    # 当前无人机相对 leader 当前状态
-    rel_state = np.concatenate([pos_i - pos_0, vel_i - vel_0])
-
-    # 初始状态差
-    init_pos_i, init_vel_i = init_obs_all[i][0:2], init_obs_all[i][10:12]
-    init_pos_0, init_vel_0 = init_obs_all[leader_id][0:2], init_obs_all[leader_id][10:12]
-    init_state = np.concatenate([init_pos_i - init_pos_0, init_vel_i - init_vel_0])
-
-    state_list = [rel_state, init_state]
-
-    # 邻居状态
-    for j in range(obs_all.shape[0]):
-        if j != i and j != leader_id:
-            dist = np.linalg.norm(obs_all[j][0:2] - pos_i)
-            if dist < Rc:
-                rel_pos = obs_all[j][0:2] - pos_i
-                rel_vel = obs_all[j][10:12] - vel_i
-                state_list.append(np.concatenate([rel_pos, rel_vel]))
-
-    return np.array(state_list)
-
-
 def run(
         drone=DEFAULT_DRONES,
-        num_drones=DEFAULT_NUM_DRONES,
+        num_drones=6,
         physics=DEFAULT_PHYSICS,
         gui=DEFAULT_GUI,
         record_video=DEFAULT_RECORD_VISION,
@@ -102,19 +66,47 @@ def run(
         colab=DEFAULT_COLAB
         ):
     #### Initialize the simulation #############################
-    H = .1
-    H_STEP = .05
-    R = .6
-    INIT_XYZS = np.array([[R*np.cos((i/6)*2*np.pi+np.pi/2), R*np.sin((i/6)*2*np.pi+np.pi/2)-R, H+i*H_STEP] for i in range(num_drones)])
-    INIT_RPYS = np.array([[0, 0,  i * (np.pi/2)/num_drones] for i in range(num_drones)])
+    INIT_XYZS = np.array([
+        [4, 4, 1], [-4, -4, 2],
+        [5.2, 5.2, 1], [2.8, 2.8, 1],
+        [-2.8, -2.8, 2], [-5.2, -5.2, 2]
+    ])
+    INIT_RPYS = np.array([[0, 0,  0] for i in range(num_drones)])
+    FORMATION_OFFSETS = np.array([
+        [0, 0, 0],
+        [1.2, 1.2, 0],
+        [-1.2, -1.2, 0]
+    ])
 
-    #### Initialize trajectory using way points ######################
-    PERIOD = 10
-    NUM_WP = control_freq_hz*PERIOD
-    TARGET_POS = np.zeros((NUM_WP,3))
+    TARGET_POS_A = np.array([-4, -4, 1])
+    TARGET_POS_B = np.array([4, 4, 1])
+    TARGET_POS = np.vstack([
+        TARGET_POS_A + FORMATION_OFFSETS[0], TARGET_POS_B + FORMATION_OFFSETS[0],
+        TARGET_POS_A + FORMATION_OFFSETS[1], TARGET_POS_A + FORMATION_OFFSETS[2],
+        TARGET_POS_B + FORMATION_OFFSETS[1], TARGET_POS_B + FORMATION_OFFSETS[2]
+    ])
+
+
+    #### Debug trajectory ######################################
+    #### Uncomment alt. target_pos in .computeControlFromState()
+    # INIT_XYZS = np.array([[.3 * i, 0, .1] for i in range(num_drones)])
+    # INIT_RPYS = np.array([[0, 0,  i * (np.pi/3)/num_drones] for i in range(num_drones)])
+    # NUM_WP = control_freq_hz*15
+    # TARGET_POS = np.zeros((NUM_WP,3))
     # for i in range(NUM_WP):
-    #     TARGET_POS[i, :] = R*np.cos((i/NUM_WP)*(2*np.pi)+np.pi/2)+INIT_XYZS[0, 0], R*np.sin((i/NUM_WP)*(2*np.pi)+np.pi/2)-R+INIT_XYZS[0, 1], 0
-    # wp_counters = np.array([int((i*NUM_WP/6)%NUM_WP) for i in range(num_drones)])
+    #     if i < NUM_WP/6:
+    #         TARGET_POS[i, :] = (i*6)/NUM_WP, 0, 0.5*(i*6)/NUM_WP
+    #     elif i < 2 * NUM_WP/6:
+    #         TARGET_POS[i, :] = 1 - ((i-NUM_WP/6)*6)/NUM_WP, 0, 0.5 - 0.5*((i-NUM_WP/6)*6)/NUM_WP
+    #     elif i < 3 * NUM_WP/6:
+    #         TARGET_POS[i, :] = 0, ((i-2*NUM_WP/6)*6)/NUM_WP, 0.5*((i-2*NUM_WP/6)*6)/NUM_WP
+    #     elif i < 4 * NUM_WP/6:
+    #         TARGET_POS[i, :] = 0, 1 - ((i-3*NUM_WP/6)*6)/NUM_WP, 0.5 - 0.5*((i-3*NUM_WP/6)*6)/NUM_WP
+    #     elif i < 5 * NUM_WP/6:
+    #         TARGET_POS[i, :] = ((i-4*NUM_WP/6)*6)/NUM_WP, ((i-4*NUM_WP/6)*6)/NUM_WP, 0.5*((i-4*NUM_WP/6)*6)/NUM_WP
+    #     elif i < 6 * NUM_WP/6:
+    #         TARGET_POS[i, :] = 1 - ((i-5*NUM_WP/6)*6)/NUM_WP, 1 - ((i-5*NUM_WP/6)*6)/NUM_WP, 0.5 - 0.5*((i-5*NUM_WP/6)*6)/NUM_WP
+    # wp_counters = np.array([0 for i in range(num_drones)])
 
     #### Create the environment ################################
     env = CtrlAviary(drone_model=drone,
@@ -132,6 +124,7 @@ def run(
                         )
 
     #### Obtain the PyBullet Client ID from the environment ####
+    time.sleep(1)
     PYB_CLIENT = env.getPyBulletClient()
 
     #### Initialize the logger #################################
@@ -142,74 +135,113 @@ def run(
                     )
 
     #### Initialize the controllers ############################
-    leaderctrl = DSLPIDControl(drone_model=DroneModel.CF2X)
-    followerctrl = [AccelerationControl(drone_model=DroneModel.CF2X) for i in range(1,num_drones)]
+    if drone in [DroneModel.CF2X, DroneModel.CF2P]:
+        ctrl = [AccelerationControl(drone_model=drone) for i in range(num_drones)] 
 
     #### Run the simulation ####################################
     action = np.zeros((num_drones,4))
-    omega = math.pi / 4
     START = time.time()
-    z_integrals = np.zeros(num_drones)
-    P_Z, I_Z, D_Z = 1.25, 0.05, 0.5 
-    init_obs_all = env._computeObs()
     for i in range(0, int(duration_sec*env.CTRL_FREQ)):
 
-        current_time = time.time() - START
+        #### Step the simulation ###################################
         obs, reward, terminated, truncated, info = env.step(action)
-        leadertarget = np.zeros(3)
-        leadertarget = R*np.sin(omega * current_time),  2*R*np.cos(omega * current_time) - 2*R, current_time/8 + 0.4 #现在这种轨迹模式用绝对时间，训练时候不能这样
+        leader_num = 2
+
+        leader_positions = np.array([obs[i][:3] for i in range(leader_num)])
+        distances = pdist(leader_positions, metric='euclidean')
+        min_distance = np.min(distances)
+
+
+        # 26个方向向量
+        possible_directions = np.array([
+            [dx, dy, dz] for dx in [-1, 0, 1] for dy in [-1, 0, 1] for dz in [-1, 0, 1] if (dx, dy, dz) != (0, 0, 0)
+        ])
+        leader_indices = [0, 1]
+        new_target_pos = np.zeros((num_drones, 3))
+
+        leader_follower_map = {
+            0: [2, 3],  # 0 号 leader 控制 2,3
+            1: [4, 5]   # 1 号 leader 控制 4,5
+        }
+
+        new_target_acc = np.zeros((num_drones, 3))
+
+        k1, k2, k3 = 20, -10, 0  # 权重系数
+
+        for leader in leader_indices:
+            current_pos = obs[leader][:3]  # 当前位置
+            target_pos = TARGET_POS[leader]  # 目标点
+            v_current = obs[leader][10:13]  # 当前速度
+
+            max_min_distance = -np.inf  # 记录最佳方向的最小距离
+            best_direction_score = -np.inf  # 记录最佳方向的分数
+            step_time = 1 / env.CTRL_FREQ  # 时间步长
+            acceleration = 5
+
+            for direction in possible_directions:
+                a_vec = acceleration * direction / np.linalg.norm(direction)  # 归一化加速度
+                v_new = v_current + a_vec * step_time  # 计算新速度
+                # 速度预测限幅检查，超过直接跳过该方向
+                if np.linalg.norm(v_new) > 20.0:
+                    continue  # 跳过这个方向
+                predicted_position = current_pos + v_new * step_time  # 预测下一步位置
+
+                # 计算新位置与其他无人机的最小距离
+                temp_positions = leader_positions.copy()
+                temp_positions[leader] = predicted_position  # 只更新当前无人机的位置
+                new_distances = pdist(temp_positions, metric='euclidean')
+                new_min_distance = np.min(new_distances)
+
+                if new_min_distance <= 4.0:
+                    collision_cost = math.exp(-2 * (new_min_distance - 4))  # exponential penalty
+                else:
+                    collision_cost = 0.0
+
+                distance_to_target = np.linalg.norm(predicted_position - target_pos)
+
+                # 计算到终点的距离
+                distance_to_target = np.linalg.norm(predicted_position - target_pos)
+
+                velocity_alignment_cost = max(0, np.dot(a_vec, v_current))  # 速度对齐成本
+
+                # 总成本
+                direction_score = k1 * collision_cost + k2 * distance_to_target + k3 * velocity_alignment_cost
+
+                if direction_score > best_direction_score:
+                    best_direction_score = direction_score
+                    best_acc = a_vec
+
+                new_target_acc[leader] = best_acc
+                for follower in leader_follower_map[leader]:
+                    new_target_acc[follower] = best_acc
+
+
+
+
+        # 计算控制
         for j in range(num_drones):
-            if j ==0:
-                action[0, :], _, _ = leaderctrl.computeControlFromState(control_timestep=env.CTRL_TIMESTEP,
-                                                             state = obs[0],
-                                                             target_pos=leadertarget,
-                                                             target_rpy=INIT_RPYS[0])
-            else:
-                state_i = get_gnn_state(obs, j, init_obs_all=init_obs_all)
-                state_tensor = torch.tensor(state_i, dtype=torch.float32, device=device)
-                with torch.no_grad():
-                    acc = actor(state_tensor).cpu().numpy() 
-                target_acc_xy = np.array([acc[0], acc[1]])
+            cur_pos = obs[j][:3]
+            cur_quat = obs[j][3:7]
+            cur_vel = obs[j][10:13]
+            cur_ang_vel = obs[j][13:16]
 
-                # z轴 PID 控制项
-                cur_z = obs[j][2]
-                cur_z_dot = obs[j][11]
-                target_z =  obs[0][2]
+            action[j, :], _ = ctrl[j].computeControl(
+                control_timestep=env.CTRL_TIMESTEP,
+                cur_pos=cur_pos,
+                cur_quat=cur_quat,
+                cur_vel=cur_vel,
+                cur_ang_vel=cur_ang_vel,
+                target_acc=new_target_acc[j],
+                target_rpy=INIT_RPYS[j, :]
+            )
 
-                # PID 控制项
-                z_err = target_z - cur_z
-                z_dot_err = -cur_z_dot
-                z_integrals[j] += z_err * env.CTRL_TIMESTEP
-                z_integrals[j] = np.clip(z_integrals[j], -1.0, 1.0)  # 限制积分发散
-
-                acc_z = P_Z * z_err + D_Z * z_dot_err + I_Z * z_integrals[j]
-
-                # 合成 target_acc
-                target_acc = np.array([acc[0], acc[1], acc_z]) 
-                action[j, :], _ = followerctrl[j-1].computeControl(
-                    control_timestep=env.CTRL_TIMESTEP,
-                    cur_pos=obs[j][0:3],
-                    cur_quat=obs[j][3:7],
-                    cur_vel=obs[j][10:13],
-                    cur_ang_vel=obs[j][13:16],
-                    target_acc=target_acc,
-                    target_rpy=np.array([0, 0, 0])
-                )
-
-
-
-        #### Compute control for the current way point #############
-        
-
-
-        #### Log the simulation ####################################
-        for j in range(num_drones):
-            logger.log(drone=j,
-                       timestamp=i/env.CTRL_FREQ,
-                       state=obs[j],
-                       control=np.hstack([leadertarget, INIT_RPYS[j, :], np.zeros(6)])
-                       # control=np.hstack([INIT_XYZS[j, :]+TARGET_POS[wp_counters[j], :], INIT_RPYS[j, :], np.zeros(6)])
-                       )
+        # 记录日志
+        logger.log(
+            drone=j,
+            timestamp=i/env.CTRL_FREQ,
+            state=obs[j],
+            control=np.hstack([new_target_pos[j], INIT_RPYS[j, :], np.zeros(6)]),
+        )
 
         #### Printout ##############################################
         env.render()
@@ -221,9 +253,7 @@ def run(
     #### Close the environment #################################
     env.close()
 
-    #### Save the simulation results ###########################
-    logger.save()
-    logger.save_as_csv("pid") # Optional CSV save
+
 
     #### Plot the simulation results ###########################
     if plot:
