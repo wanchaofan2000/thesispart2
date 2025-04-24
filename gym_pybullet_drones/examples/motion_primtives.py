@@ -67,31 +67,6 @@ def generate_path_library(
 
 path_library = generate_path_library()
 
-def compute_aligned_endpoints(current_pos, current_vel, path):
-    """
-    输入：当前位置 current_pos、当前速度 current_vel、路径原语库 path_library
-    输出：所有对齐并平移后的轨迹终点位置组成的 endpoints 数组
-    """
-    v_norm = np.linalg.norm(current_vel)
-    v_dir = np.array([1.0, 0.0, 0.0]) if v_norm < 1e-6 else current_vel / v_norm
-
-    x_axis = np.array([1.0, 0.0, 0.0])
-
-    if np.allclose(v_dir, x_axis):
-        rot_matrix = np.eye(3)
-    else:
-        axis = np.cross(x_axis, v_dir)
-        angle = np.arccos(np.clip(np.dot(x_axis, v_dir), -1.0, 1.0))
-        axis /= np.linalg.norm(axis)
-        rot_matrix = R.from_rotvec(angle * axis).as_matrix()
-
-    endpoint = np.array([
-        (rot_matrix @ path.T).T[-1] + current_pos
-    ])
-
-    return endpoint
-
-paths = generate_path_library()
 
 DEFAULT_DRONES = DroneModel("cf2x")
 DEFAULT_NUM_DRONES = 2
@@ -223,41 +198,49 @@ def run(
 
                     align_dir = current_vel / v_norm
 
-                endpoints = []
-                goal_dists = []
-                min_dists = []
-                shrink_penalties = []
-                collision_penalties = []
-                total_costs = []
-                others = np.delete(positions, drone, axis=0)
-                for p in path_library:
-                    k = p['k']
-                    path = p['path']
-                    endpoint = compute_aligned_endpoints(current_pos, align_dir, path)
-                    endpoints.append(endpoint)
-                    goal_dists.append(np.linalg.norm(endpoint - target_pos))
-                    # 最近他人距离
-                    dist_to_others = np.min(np.linalg.norm(endpoint - others, axis=1))
-                    min_dists.append(dist_to_others)
+                # 构造旋转矩阵
+                x_axis = np.array([1.0, 0.0, 0.0])
+                if np.allclose(align_dir, x_axis):
+                    rot_matrix = np.eye(3)
+                else:
+                    axis = np.cross(x_axis, align_dir)
+                    angle = np.arccos(np.clip(np.dot(x_axis, align_dir), -1.0, 1.0))
+                    axis /= np.linalg.norm(axis)
+                    rot_matrix = R.from_rotvec(angle * axis).as_matrix()
 
-                    # 非线性避碰代价（带收缩因子k）
-                    k_d_safe = k * d_safe
-                    if dist_to_others < k_d_safe:
-                        collision_penalty = np.exp(-beta * (dist_to_others - k_d_safe)**2)
-                    else:
-                        collision_penalty = 0.0
-                    collision_penalties.append(collision_penalty)
+                # 批量处理路径原语
+                paths = np.array([p['path'] for p in path_library])           # shape = (P, M, 3)
+                ks = np.array([p['k'] for p in path_library])                 # shape = (P,)
 
-                    # 收缩惩罚
-                    gamma = 1
-                    shrink_penalty = np.exp(gamma * (k - 1)**2)
-                    shrink_penalties.append(shrink_penalty)
+                # 批量旋转路径并平移终点
+                rotated_paths = paths @ rot_matrix.T                         # (P, M, 3)
+                endpoints = rotated_paths[:, -1, :] + current_pos            # shape = (P, 3)
 
-                    total_costs.append(lambda_g * goal_dists[-1] + lambda_c * collision_penalty + shrink_penalty)
+                # 距离目标点
+                goal_dists = np.linalg.norm(endpoints - target_pos, axis=1)  # shape = (P,)
 
-                    best_idx = np.argmin(total_costs)
+                # 距离其他无人机
+                others = np.delete(positions, drone, axis=0)                 # shape = (D-1, 3)
+                dist_matrix = np.linalg.norm(endpoints[:, None, :] - others[None, :, :], axis=2)  # (P, D-1)
+                min_dists = np.min(dist_matrix, axis=1)
+
+                # 代价计算
+                k_d_safes = ks * d_safe
+                collision_penalties = np.where(
+                    min_dists < k_d_safes,
+                    np.exp(-beta * (min_dists - k_d_safes) ** 2),
+                    0.0
+                )
+
+                gamma = 0.5
+
+                shrink_penalties = np.exp(gamma * (ks - 1) ** 2)
+                total_costs = lambda_g * goal_dists + lambda_c * collision_penalties + shrink_penalties
+
+                # 最优目标
+                best_idx = np.argmin(total_costs)
                 best_goal = endpoints[best_idx]
-                best_k = path_library[best_idx]['k']
+                best_k = ks[best_idx]
                 best_goals[drone] = best_goal
 
 
