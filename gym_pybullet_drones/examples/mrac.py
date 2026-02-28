@@ -4,6 +4,11 @@ import numpy as np
 import pybullet as p
 import matplotlib.pyplot as plt
 import pybullet_data
+import sys
+new_path = '/home/uavlab/chaofan/gym-pybullet-drones'
+sys.path.append(new_path)
+new_path = '/home/uavlab/chaofan/gym-pybullet-drones/gym_pybullet_drones'
+sys.path.append(new_path)
 
 from gym_pybullet_drones.utils.enums import DroneModel, Physics
 from gym_pybullet_drones.envs.CtrlAviary import CtrlAviary
