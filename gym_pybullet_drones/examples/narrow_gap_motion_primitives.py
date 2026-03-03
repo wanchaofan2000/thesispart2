@@ -65,7 +65,7 @@ def generate_path_library(
                     rotated = (rot @ arc.T).T
                     base_paths.append(rotated)
 
-    k_values = [0.9, 1.0, 1.1]
+    k_values = [0.98, 1.0, 1.02]
     full_library = []
     for path in base_paths:
         for k in k_values:
@@ -98,12 +98,13 @@ OBSTACLE_KD_TREE = None
 
 def _compute_obstacle_penalties(rotated_paths,
                                 current_pos,
-                                ks,
+                                candidate_d_safes,
                                 kd_tree,
-                                leader_safe_radius,
-                                min_safe_radius,
-                                lambda_obs=3.0):
+                                min_safe_radius):
     """基于领导者路径与障碍的最近距离惩罚。"""
+    obstacle_buffer = 0.12
+    lambda_obs = 6.0
+
     if kd_tree is None:
         return np.zeros(rotated_paths.shape[0])
 
@@ -113,11 +114,12 @@ def _compute_obstacle_penalties(rotated_paths,
         dists, _ = kd_tree.query(path_world, k=1)
         min_dist = float(np.min(dists))
 
-        effective_radius = max(min_safe_radius, leader_safe_radius * ks[idx])
+        effective_radius = max(min_safe_radius, candidate_d_safes[idx])
         clearance = min_dist - effective_radius
 
-        if clearance < 0:
-            penalties[idx] = lambda_obs * (-clearance)
+        # Keep a small positive buffer due to surface point-cloud discretization.
+        if clearance < obstacle_buffer:
+            penalties[idx] = lambda_obs * (obstacle_buffer - clearance)
         else:
             penalties[idx] = 0.0
 
@@ -160,12 +162,16 @@ def _select_leader_goal(current_pos,
                         ks,
                         leader_d_safe,
                         leader_d_safe_init,
-                        min_d_safe):
+                        min_d_safe,
+                        max_d_safe):
     """从候选运动原语中选取下一目标点与收缩因子。"""
+    success_threshold = 0.4
+    shrink_penalty_weight = 0.4
+
     direction_to_target = center_goal - current_pos
     distance_to_target = np.linalg.norm(direction_to_target)
 
-    if distance_to_target < 0.4:
+    if distance_to_target < success_threshold:
         return center_goal, 1.0
 
     t_now = step * env.CTRL_TIMESTEP
@@ -176,17 +182,13 @@ def _select_leader_goal(current_pos,
     endpoints = rotated_paths[:, -1, :] + current_pos
     goal_dists = np.linalg.norm(endpoints - center_goal, axis=1)
 
-    shrink_ratios = leader_d_safe * ks / leader_d_safe_init
-    shrink_penalties = np.where(
-        shrink_ratios < 1,
-        np.exp(0.0005 * (1 - shrink_ratios) ** 2),
-        1.0
-    )
+    candidate_d_safes = np.clip(leader_d_safe * ks, min_d_safe, max_d_safe)
+    shrink_ratios = np.clip(candidate_d_safes / leader_d_safe_init, 0.0, 1.0)
+    shrink_penalties = shrink_penalty_weight * np.exp(-np.square(shrink_ratios))
     obstacle_penalties = _compute_obstacle_penalties(rotated_paths,
                                                      current_pos,
-                                                     ks,
+                                                     candidate_d_safes,
                                                      OBSTACLE_KD_TREE,
-                                                     leader_d_safe,
                                                      min_d_safe)
     total_costs = goal_dists + shrink_penalties + obstacle_penalties
     best_idx = np.argmin(total_costs)
@@ -308,7 +310,8 @@ def run(
                                                     ks=ks,
                                                     leader_d_safe=leader_d_safes[idx],
                                                     leader_d_safe_init=leader_d_safes_init[idx],
-                                                    min_d_safe=min_d_safe)
+                                                    min_d_safe=min_d_safe,
+                                                    max_d_safe=max_d_safe)
 
             leader_d_safes[idx] = np.clip(leader_d_safes[idx] * best_k, min_d_safe, max_d_safe)
             ratio = leader_d_safes[idx] / leader_d_safes_init[idx]
