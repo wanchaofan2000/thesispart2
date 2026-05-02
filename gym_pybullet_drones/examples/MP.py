@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation as R
 import sys
 from pathlib import Path
+from PIL import Image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -29,7 +30,18 @@ from gym_pybullet_drones.utils.utils import sync, str2bool
 from gym_pybullet_drones.examples.obstacles import (
     DEFAULT_GAP_CENTER,
     DEFAULT_CAMERA_DISTANCE,
+    DEFAULT_GAP_OBSTACLE,
     build_narrow_gap_kdtree,
+)
+from gym_pybullet_drones.examples.plot_record_utils import (
+    DEFAULT_LOG_DIR,
+    get_obstacle_box_specs,
+    plot_3d_trajectories,
+    plot_safety_histories,
+    plot_top_view_trajectories,
+    resolve_output_path,
+    save_summary_text,
+    save_thesis_figure,
 )
 
 
@@ -90,8 +102,10 @@ DEFAULT_OBSTACLES = False
 DEFAULT_SIMULATION_FREQ_HZ = 240
 DEFAULT_CONTROL_FREQ_HZ = 48
 DEFAULT_DURATION_SEC = 12
-DEFAULT_OUTPUT_FOLDER = 'results'
+DEFAULT_OUTPUT_FOLDER = str(DEFAULT_LOG_DIR)
 DEFAULT_COLAB = False
+DEFAULT_DRONE_COLLISION_RADIUS = 0.06
+DEFAULT_GAP_WIDTH = float(DEFAULT_GAP_OBSTACLE["gap_width"])
 
 OBSTACLE_POINTS = None
 OBSTACLE_KD_TREE = None
@@ -153,6 +167,71 @@ def _rotation_from_x_axis(target_direction):
     return R.from_rotvec(angle * axis).as_matrix()
 
 
+def _pairwise_min_distance(positions):
+    if len(positions) < 2:
+        return np.inf
+
+    min_dist = np.inf
+    for i in range(len(positions)):
+        for j in range(i + 1, len(positions)):
+            dist = float(np.linalg.norm(positions[i] - positions[j]))
+            if dist < min_dist:
+                min_dist = dist
+    return min_dist
+
+
+def _min_obstacle_clearance(positions, kd_tree, drone_radius):
+    if kd_tree is None or len(positions) == 0:
+        return np.inf
+    dists, _ = kd_tree.query(np.asarray(positions), k=1)
+    return float(np.min(dists) - drone_radius)
+
+
+def _path_length(path_points):
+    if len(path_points) < 2:
+        return 0.0
+    diffs = np.diff(np.array(path_points), axis=0)
+    return float(np.sum(np.linalg.norm(diffs, axis=1)))
+
+
+def _find_latest_recording_artifacts(output_path):
+    """定位本次录制生成的 MP4 或 PNG 帧目录。"""
+    mp4_files = sorted(output_path.glob("video-*.mp4"), key=lambda path: path.stat().st_mtime)
+    frame_dirs = sorted(
+        [path for path in output_path.glob("recording_*") if path.is_dir()],
+        key=lambda path: path.stat().st_mtime,
+    )
+    latest_mp4 = mp4_files[-1] if mp4_files else None
+    latest_frame_dir = frame_dirs[-1] if frame_dirs else None
+    return latest_mp4, latest_frame_dir
+
+
+def _export_frames_to_gif(frame_dir, fps=24):
+    """将 DIRECT 模式录制的 PNG 帧合成为 GIF 动画。"""
+    frame_paths = sorted(
+        frame_dir.glob("frame_*.png"),
+        key=lambda path: int(path.stem.split("_")[-1]),
+    )
+    if not frame_paths:
+        return None
+
+    frames = []
+    for frame_path in frame_paths:
+        with Image.open(frame_path) as frame:
+            frames.append(frame.convert("P", palette=Image.ADAPTIVE))
+
+    gif_path = frame_dir / "simulation.gif"
+    duration_ms = max(int(1000 / fps), 1)
+    frames[0].save(
+        gif_path,
+        save_all=True,
+        append_images=frames[1:],
+        duration=duration_ms,
+        loop=0,
+    )
+    return gif_path
+
+
 def _select_leader_goal(current_pos,
                         current_vel,
                         center_goal,
@@ -205,10 +284,10 @@ def _plot_shrink_histories(shrink_histories, leader_indices):
         history = shrink_histories[leader]
         if history:
             times, ratios = zip(*history)
-            plt.plot(times, ratios, label=f"Leader {leader}")
-    plt.xlabel('Time [s]')
-    plt.ylabel('Shrink ratio (d_safe / d_safe_init)')
-    plt.title('Leader shrink ratios over time')
+            plt.plot(times, ratios, label=f"领导者 {leader}")
+    plt.xlabel('时间 [s]')
+    plt.ylabel('收缩比 (d_safe / d_safe_init)')
+    plt.title('弹性编队运动原语方法收缩比变化曲线')
     plt.legend()
     plt.grid(True, linestyle='--', alpha=0.4)
 
@@ -226,13 +305,14 @@ def run(
     control_freq_hz=DEFAULT_CONTROL_FREQ_HZ,
     duration_sec=DEFAULT_DURATION_SEC,
     output_folder=DEFAULT_OUTPUT_FOLDER,
-    colab=DEFAULT_COLAB
+    colab=DEFAULT_COLAB,
+    gap_width=DEFAULT_GAP_WIDTH,
 ):
     """主仿真入口：四机编队穿缝。"""
     global OBSTACLE_POINTS, OBSTACLE_KD_TREE
 
-    center_start = np.array([-6.0, 0.0, 1.5])
-    center_goal = np.array([6.0, 0.0, 1.5])
+    center_start = np.array([-3.0, 0.0, 1.5])
+    center_goal = np.array([3.0, 0.0, 1.5])
 
     triangle_offset = 0.8
     sqrt3_over_2 = np.sqrt(3) / 2
@@ -245,6 +325,11 @@ def run(
 
     INIT_XYZS = center_start + base_offsets
     INIT_RPYS = np.zeros((num_drones, 3))
+    nominal_goals = center_goal + base_offsets
+    output_path = resolve_output_path(output_folder)
+    obstacle_cfg = dict(DEFAULT_GAP_OBSTACLE)
+    obstacle_cfg["gap_width"] = float(gap_width)
+    obstacle_specs = get_obstacle_box_specs(cfg=obstacle_cfg)
 
     leader_indices = [0]
     follower_indices = {0: [1, 2, 3]}
@@ -265,12 +350,17 @@ def run(
                      gui=gui,
                      record=record_video,
                      obstacles=obstacles,
-                     user_debug_gui=user_debug_gui)
+                     user_debug_gui=user_debug_gui,
+                     output_folder=str(output_path))
 
     time.sleep(1)
     PYB_CLIENT = env.getPyBulletClient()
 
-    OBSTACLE_POINTS, OBSTACLE_KD_TREE = build_narrow_gap_kdtree(PYB_CLIENT)
+    OBSTACLE_POINTS, OBSTACLE_KD_TREE = build_narrow_gap_kdtree(
+        PYB_CLIENT,
+        cfg=obstacle_cfg,
+        sample_volume=True,
+    )
 
     if gui:
         p.resetDebugVisualizerCamera(
@@ -283,7 +373,7 @@ def run(
 
     logger = Logger(logging_freq_hz=control_freq_hz,
                     num_drones=num_drones,
-                    output_folder=output_folder,
+                    output_folder=str(output_path),
                     colab=colab)
 
     controllers = [DSLPIDControl(drone_model=drone) for _ in range(num_drones)]
@@ -293,10 +383,33 @@ def run(
 
     paths = np.array([p['path'] for p in path_library])
     ks = np.array([p['k'] for p in path_library])
+    trajectory_histories = [[] for _ in range(num_drones)]
+    min_pair_distance_history = []
+    min_obstacle_clearance_history = []
+    completion_time_sec = None
+    last_obs = None
 
     for step in range(0, int(duration_sec * env.CTRL_FREQ)):
         obs, _, _, _, _ = env.step(action)
+        last_obs = obs
         best_goals = np.array([obs[i][:3] for i in range(num_drones)])
+        positions = np.array([obs[i][:3] for i in range(num_drones)])
+        for drone_id in range(num_drones):
+            trajectory_histories[drone_id].append(positions[drone_id].copy())
+        min_pair_distance_history.append((step / env.CTRL_FREQ, _pairwise_min_distance(positions)))
+        min_obstacle_clearance_history.append(
+            (
+                step / env.CTRL_FREQ,
+                _min_obstacle_clearance(
+                    positions,
+                    OBSTACLE_KD_TREE,
+                    DEFAULT_DRONE_COLLISION_RADIUS,
+                ),
+            )
+        )
+        if completion_time_sec is None and np.linalg.norm(obs[0][:3] - center_goal) < 0.4:
+            completion_time_sec = step / env.CTRL_FREQ
+            break
 
         for idx, drone_id in enumerate(leader_indices):
             current_pos = obs[drone_id][:3]
@@ -340,9 +453,106 @@ def run(
             sync(step, START, env.CTRL_TIMESTEP)
 
     env.close()
+    if last_obs is None:
+        final_positions = INIT_XYZS.copy()
+    else:
+        final_positions = np.array([last_obs[i][:3] for i in range(num_drones)])
+    final_goal_dists = np.linalg.norm(nominal_goals - final_positions, axis=1)
+    final_leader_pos = final_positions[0]
+    final_dist = float(np.linalg.norm(center_goal - final_leader_pos))
+    reached = final_dist < 0.4
+    leader_path_length = _path_length(trajectory_histories[0]) if trajectory_histories[0] else 0.0
+    straight = float(np.linalg.norm(center_goal - center_start))
+    min_pair_distance = (
+        float(min(value for _, value in min_pair_distance_history))
+        if min_pair_distance_history
+        else np.inf
+    )
+    min_obstacle_clearance = (
+        float(min(value for _, value in min_obstacle_clearance_history))
+        if min_obstacle_clearance_history
+        else np.inf
+    )
+    final_shrink_ratios = leader_d_safes / leader_d_safes_init
+    min_shrink_ratio = min(
+        (min(ratio for _, ratio in history) for history in shrink_histories.values() if history),
+        default=1.0,
+    )
+    last_timestamp = float(min_pair_distance_history[-1][0]) if min_pair_distance_history else 0.0
+    final_sim_time_sec = completion_time_sec if completion_time_sec is not None else last_timestamp
+
+    summary_lines = [
+        "=== Motion primitives with shrink summary ===",
+        f"Reached center goal (<0.40 m): {reached}",
+        (
+            f"Completion time [s]: {completion_time_sec:.3f}"
+            if completion_time_sec is not None
+            else f"Completion time [s]: not reached (ran to {final_sim_time_sec:.3f})"
+        ),
+        f"Final leader distance to goal [m]: {final_dist:.3f}",
+        f"Final goal distances [m]: {np.array2string(final_goal_dists, precision=3)}",
+        f"Leader traveled length [m]: {leader_path_length:.3f}",
+        f"Straight-line length [m]: {straight:.3f}",
+        f"Narrow-gap width [m]: {gap_width:.3f}",
+        f"Final shrink ratios: {np.array2string(final_shrink_ratios, precision=3)}",
+        f"Minimum shrink ratio during run: {min_shrink_ratio:.3f}",
+        f"Minimum pairwise distance during run [m]: {min_pair_distance:.3f}",
+        f"Minimum obstacle clearance during run [m]: {min_obstacle_clearance:.3f}",
+    ]
+    summary_path = save_summary_text(output_path, "MP_metrics.txt", summary_lines)
+    saved_figure_paths = []
+    video_output_path = None
+    frame_output_path = None
     if plot:
-        _plot_shrink_histories(shrink_histories, leader_indices)
-        logger.plot()
+        safety_fig = plot_safety_histories(
+            min_pair_distance_history,
+            min_obstacle_clearance_history,
+            title=f"弹性编队运动原语方法安全距离变化曲线（缝隙宽度={gap_width:.2f} m）",
+        )
+        traj_3d_fig = plot_3d_trajectories(
+            trajectory_histories=trajectory_histories,
+            nominal_goals=nominal_goals,
+            final_positions=final_positions,
+            obstacle_specs=obstacle_specs,
+            title=f"弹性编队运动原语方法三维轨迹图（缝隙宽度={gap_width:.2f} m）",
+        )
+        top_view_fig = plot_top_view_trajectories(
+            trajectory_histories=trajectory_histories,
+            nominal_goals=nominal_goals,
+            final_positions=final_positions,
+            obstacle_specs=obstacle_specs,
+            title=f"弹性编队运动原语方法俯视轨迹图（缝隙宽度={gap_width:.2f} m）",
+        )
+        figure_specs = [
+            (safety_fig, output_path / "MP_safety.png"),
+            (traj_3d_fig, output_path / "MP_3d.png"),
+            (top_view_fig, output_path / "MP_top.png"),
+        ]
+        for fig, fig_path in figure_specs:
+            if fig is not None:
+                save_thesis_figure(fig, fig_path)
+                saved_figure_paths.append(fig_path)
+        plt.show()
+
+    print()
+    for line in summary_lines:
+        print(line)
+    print(f"Saved metrics text: {summary_path}")
+    if saved_figure_paths:
+        print("Saved figures:")
+        for fig_path in saved_figure_paths:
+            print(f"  {fig_path}")
+    if record_video:
+        video_output_path, frame_output_path = _find_latest_recording_artifacts(output_path)
+        if video_output_path is None and frame_output_path is not None:
+            video_output_path = _export_frames_to_gif(frame_output_path)
+
+        if video_output_path is not None:
+            print(f"Recorded simulation animation: {video_output_path}")
+        elif frame_output_path is not None:
+            print(f"Recorded frames directory: {frame_output_path}")
+        else:
+            print(f"Recording was enabled, but no recording artifact was found in: {output_path}")
 
 
 if __name__ == "__main__":
@@ -360,6 +570,7 @@ if __name__ == "__main__":
     parser.add_argument('--duration_sec', default=DEFAULT_DURATION_SEC, type=int)
     parser.add_argument('--output_folder', default=DEFAULT_OUTPUT_FOLDER, type=str)
     parser.add_argument('--colab', default=DEFAULT_COLAB, type=bool)
+    parser.add_argument('--gap_width', default=DEFAULT_GAP_WIDTH, type=float)
     ARGS = parser.parse_args()
 
     run(**vars(ARGS))

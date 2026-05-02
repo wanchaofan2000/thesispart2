@@ -1,0 +1,24 @@
+% 中文摘要
+多无人机系统在低空物流中能够提升配送效率、扩展任务覆盖范围并支撑重载运输，但在复杂城市环境下仍面临能耗约束路径规划不足、定位误差下编队避碰风险增加以及协同吊运强耦合难以稳定控制等问题。为此，本文围绕面向低空物流的多无人机协同规划与控制问题展开研究，主要内容和成果如下：
+
+（1）针对三维环境中的无人机路径规划问题，提出了一种考虑能耗约束的改进可视图路径规划方法。通过兴趣区域筛选、分层切片和极角端点筛选压缩图规模，并结合飞行动力学能耗模型构造综合边权，实现路径长度与能量消耗的统一优化。对比实验表明，所提方法在不同场景下均具有较高规划效率，并在中高复杂度环境中优于基础可视图方法和栅格化A*方法，在建图规模、搜索效率与路径质量之间取得了较好平衡。
+
+（2）针对定位误差下多无人机编队穿越受限空间的轨迹规划问题，提出了一种弹性编队运动原语轨迹规划方法。在独立高斯定位误差假设下建立编队内部碰撞概率模型，并将碰撞风险转化为关于缩放因子的代价项；进一步构造包含路径模板和缩放动作的运动原语库，在原语选择中统一考虑目标推进、内部避碰和障碍安全裕度。仿真结果表明，所提方法相对于刚性编队运动原语和分布式运动原语方法具有优势，并能够根据不同通道宽度实现自适应编队形变。
+
+（3）针对三机协同负载运输中的控制问题，提出了一种基于强化学习的协同运输控制方法。建立了绳索约束下无人机协同负载模型，将任务表述部分可观测马尔可夫决策过程，设计局部观测、归一化控制量和奖励函数，并构建集中训练、去中心化执行的多智能体强化学习框架及并行仿真环境。仿真结果表明，所提方法能够实现负载到达、速度衰减、摆动抑制与构型保持，在主任务评估中取得高成功率，短到达时间，小终端位置误差，并在圆周参考扩展实验中表现出一定的任务适应能力。
+
+本文从路径规划、轨迹规划到协同运输控制构建了面向低空物流的多无人机协同规划与控制方法，多无人机系统的安全、高效和稳定运行提供了可行方案。
+\noindent\textbf{关键词：}多无人机系统，低空物流，路径规划，轨迹规划，协同运输控制
+
+% English Abstract
+Multi-UAV systems can improve delivery efficiency, expand mission coverage, and support heavy-payload transportation in low-altitude logistics. However, in complex urban environments, they still face such problems as insufficient path planning under energy constraints, increased formation collision risk under positioning uncertainty, and difficulty in stabilizing strongly coupled cooperative transportation. To address these issues, this thesis studies cooperative planning and control for multi-UAV systems in low-altitude logistics. The main contents and contributions are as follows:
+
+(1) For UAV path planning in three-dimensional environments, an improved visibility-graph-based path planning method with energy constraints is proposed. The graph scale is compressed through region-of-interest filtering, layered slicing, and polar-angle endpoint screening. A comprehensive edge-weight model is further constructed by incorporating a flight-dynamics-based energy-consumption model, so that path length and energy consumption can be optimized in a unified manner. Comparative experiments show that the proposed method achieves high planning efficiency in different scenarios and outperforms the basic visibility-graph method and grid-based A* method in medium- and high-complexity environments, achieving a good balance among graph size, search efficiency, and path quality.
+
+(2) For multi-UAV formation trajectory planning in constrained spaces under positioning uncertainty, an elastic formation motion-primitive trajectory planning method is proposed. Under the assumption of independent Gaussian positioning errors, a probabilistic intra-formation collision model is established, and the collision risk is converted into a cost term associated with the scaling factor. Furthermore, a motion-primitive library containing path templates and scaling actions is constructed, in which goal progression, intra-formation collision avoidance, and obstacle safety margin are jointly considered during primitive selection. Simulation results show that the proposed method has advantages over rigid-formation motion-primitive and distributed motion-primitive methods, and can realize adaptive formation deformation under different passage widths.
+
+(3) For the control problem in three-UAV cooperative payload transportation, a cooperative transportation control method based on reinforcement learning is proposed. A UAV cooperative payload model under cable constraints is established, and the task is formulated as a partially observable Markov decision process. Local observations, normalized control commands, and a reward function are designed, and a multi-agent reinforcement learning framework with centralized training and decentralized execution, together with a parallel simulation environment, is constructed. Simulation results show that the proposed method can achieve payload arrival, velocity attenuation, swing suppression, and formation maintenance. In the main-task evaluation, it attains a high success rate, short arrival time, and small terminal position error, and also demonstrates a certain degree of task adaptability in the circular-reference extension experiment.
+
+This thesis develops a cooperative planning and control method for multi-UAV systems in low-altitude logistics, covering path planning, trajectory planning, and cooperative transportation control, and provides a feasible solution for the safe, efficient, and stable operation of multi-UAV systems.
+
+\noindent\textbf{Key words:} Multi-UAV systems, low-altitude logistics, path planning, trajectory planning, cooperative transportation control

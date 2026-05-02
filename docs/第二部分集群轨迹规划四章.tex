@@ -1,0 +1,410 @@
+\chapter{考虑位置不确定性的多无人机轨迹规划方法}
+
+低空物流任务中的大载荷运输、密集配送与受限空域穿行，通常要求多架无人机以编队形式协同飞行。编队穿越楼宇间通道、仓储区作业带或临时障碍围成的窄缝时，轨迹规划既要保证整体向目标区域推进，又要维持成员之间的相对构型，并满足机间与障碍之间的安全净空。位置不确定性存在时，基于名义位置给出的安全间隔将被进一步压缩，受限空间中的通行风险随之增大。针对上述问题，本章在编队内部碰撞建模中引入位置不确定性，并将编队缩放动作纳入局部轨迹规划过程，提出考虑位置不确定性的多无人机轨迹规划方法。
+
+本章首先给出场景与状态描述，在独立高斯位置误差假设下建立编队内部碰撞的概率模型，并将碰撞风险写为编队缩放因子的函数；随后构造包含路径模板与缩放动作的 MP 库，通过统一代价在每个重规划周期内完成原语选择，并生成连续参考轨迹供底层控制器跟踪；最后在 PyBullet 中构建四机窄缝穿越场景，与分布式 MP 和刚性编队 MP 进行对比，说明考虑位置不确定性的多无人机轨迹规划方法在受限空间通行、编队保持和任务效率方面的综合优势，验证其对低空物流系统中受限空间编队通行与局部避碰问题的有效性。该方法的整体框架如图~\ref{framework2} 所示。
+
+\begin{figure}[!h]
+  \centering
+  \includegraphics[width=1\textwidth]{pic/算法框图2.png}
+  \caption{考虑位置不确定性的多无人机轨迹规划方法框架图}
+  \label{framework2}
+\end{figure}
+
+\section{问题描述}
+
+本章关注的局部场景为编队沿既定航线穿越受限空间。编队中心具备通行条件，并不等同于全部成员均具备足够通过裕度；在位置偏差作用下，机间间距与障碍净空还将进一步减小。低空物流任务中，受单架无人机载荷能力、续航水平和复杂环境适应能力限制，多无人机协同编队构成典型的运输单元。编队飞行过程中，各成员需要按照预设构型协同运动，局部轨迹规划不仅关系到整体运输效率，也关系到队形稳定、障碍规避和机间避碰等约束的同时满足。
+
+实际飞行条件下，无人机位置估计通常受到卫星定位误差、传感器噪声、外界扰动以及状态估计算法精度等因素影响，其在全局坐标系中的位置状态具有不确定性。编队穿越受限空间时，基于名义位置建立的安全间隔难以直接反映真实飞行中的可通行裕度，局部轨迹规划因而同时受到编队结构约束与空间不确定性约束。为统一后续碰撞建模与局部规划中的变量表达，本节先对环境、编队和误差模型作出定义。
+
+设三维任务空间为 $W \subset \mathbb{R}^{3}$，其中包含若干静态障碍物；环境中的障碍物集合记为 $O = \{O_{1}, O_{2}, \ldots, O_{M}\}$，第 $j$ 个障碍物在局部坐标系下的几何占据区域记为 $B_{j} \subset \mathbb{R}^{3}$。考虑由 $N$ 架无人机构成的编队，无人机集合记为 $U = \{1,2,\ldots,N\}$，第 $i$ 架无人机在机体系下的几何占据区域记为 $Q_{i} \subset \mathbb{R}^{3}$。本章仅考虑几何对象在全局坐标系中的平移误差，局部占据形状保持不变，不确定性统一由状态估计误差表征。
+
+设第 $i$ 架无人机在时刻 $t$ 的名义位置和实际位置分别为 $\hat{p}_{i}(t), p_{i}(t) \in \mathbb{R}^{3}$。若障碍物位置由先验地图或外部感知给出，记其名义参考位置和实际位置分别为 $\hat{c}_{j}, c_{j} \in \mathbb{R}^{3}$。位置偏差关系可写为 $p_{i}(t)=\hat{p}_{i}(t)+e_{i}(t)$ 和 $c_{j}=\hat{c}_{j}+\delta_{j}$，其中 $e_{i}(t)$ 为第 $i$ 架无人机的位置误差向量，$\delta_{j}$ 为第 $j$ 个障碍物在全局坐标系中的位置偏差。规划层采用各向同性高斯模型描述位置误差，即 $e_{i}(t)\sim \mathcal{N}\bigl(0,\sigma_{i}^{2}I_{3}\bigr)$、$\delta_{j}\sim \mathcal{N}\bigl(0,\sigma_{o,j}^{2}I_{3}\bigr)$，其中 $\sigma_{i}^{2}$ 为无人机位置误差方差，$\sigma_{o,j}^{2}$ 为第 $j$ 个障碍物位置不确定性的方差参数，$I_{3}$ 为三维单位矩阵。该误差模型刻画了位置误差的概率特性，并作为后续概率安全约束与原语代价构造的基础。
+
+编队任务由目标点 $p_{g} \in \mathbb{R}^{3}$ 给出。为统一描述整体运动，引入编队中心 $p_{c}(t) \in \mathbb{R}^{3}$，并设标准构型下第 $i$ 架无人机相对于编队中心的期望相对位置为 $r_{i}^{0} \in \mathbb{R}^{3}$。记编队缩放因子为 $k(t) > 0$，则时刻 $t$ 的理想构型满足
+\[
+p_{i}^{\mathrm{ref}}(t) = p_{c}(t) + k(t) r_{i}^{0}.
+\]
+当 $k(t)=1$ 时，编队保持标准构型；当 $0<k(t)<1$ 时，编队收缩；当 $k(t)>1$ 时，编队扩张。变量 $k(t)$ 直接表征编队整体占据尺度的变化。
+
+在给定障碍物集合、编队初始状态、目标位置和误差统计模型后，需要求解一组名义轨迹 $\bigl\{\hat{p}_{i}(t)\bigr\}_{i=1}^{N}$，其中 $t \in [0,T]$，以及相应的编队中心轨迹 $p_{c}(t)$ 与缩放因子 $k(t)$，使编队在满足运动约束的前提下到达目标区域。若以编队中心代表整体位置，则到达条件与编队保持约束可概括为 $p_{c}(T)\in G$ 且 $p_{i}(t)-p_{c}(t)\approx k(t) r_{i}^{0}$，其中 $G \subset \mathbb{R}^{3}$ 为以目标点 $p_{g}$ 为中心的容许区域。
+
+对任意两架不同无人机 $i,j\in U$ 且 $i\neq j$，其在全局坐标系中的实际占据区域分别为 $Q_{i} + p_{i}(t)$ 和 $Q_{j} + p_{j}(t)$。确定性条件下的机间无碰撞要求为
+\[
+\bigl(Q_{i} + p_{i}(t)\bigr) \cap \bigl(Q_{j} + p_{j}(t)\bigr) = \varnothing, \quad \forall t\in[0,T].
+\]
+位置不确定性存在时，上式需要改写为概率约束。对任意无人机 $i\in U$ 与任意障碍物 $O_{j}\in O$，其实际占据区域分别为 $Q_{i} + p_{i}(t)$ 和 $B_{j} + c_{j}$，对应的确定性无碰撞条件为
+\[
+\bigl(Q_{i} + p_{i}(t)\bigr) \cap \bigl(B_{j} + c_{j}\bigr) = \varnothing, \quad \forall t\in[0,T].
+\]
+除安全约束外，轨迹还需满足飞行动力学或运动学限制。记第 $i$ 架无人机的状态为 $x_{i}(t)$，控制输入为 $u_{i}(t)$，则其运动过程满足 $\dot{x}_{i}(t)=f_{i}\bigl(x_{i}(t),u_{i}(t)\bigr)$，并受到速度、加速度和控制量上界等约束。
+
+据此，本章所研究的局部规划问题可表述为：在给定环境障碍物集合、编队初始状态、目标位置以及位置误差统计模型的条件下，求解满足目标到达、编队保持、机间避碰、障碍物避碰以及动力学可行性要求的实时规划轨迹。后续内容将围绕概率风险建模、局部原语规划与轨迹执行展开。
+
+\section{位置不确定性下的编队避碰建模}
+
+在存在定位误差、感知误差和运动扰动的飞行场景中，基于名义位置的确定性安全距离难以直接反映真实碰撞风险。Zhu和Alonso-Mora针对微型无人机动态避碰问题，将机器人与障碍物位置不确定性纳入机会约束模型，并在高斯分布假设下处理碰撞概率约束\cite{zhu2019chanceMAV}。Wu等进一步面向无人机位置不确定性路径规划问题，将无人机与障碍物位置误差表示为高斯随机变量，并通过相对不确定性转换将概率约束转化为确定性风险边界\cite{wu2020safeUAVLocation}。Zhu等提出的缓冲不确定感知Voronoi单元方法则利用位置均值、协方差和碰撞概率阈值构造多机器人局部安全区域，为多机系统中的概率避碰建模提供了参考\cite{zhu2022buavc}。
+
+考虑窄缝穿越阶段的飞行高度通常保持在给定飞行层附近，主要风险集中于水平平面内的横向占据和机间间距变化。基于此，本节在局部规划层采用平面正 $N$ 边形编队近似，建立缩放动作与机间碰撞风险之间的对应关系。在位置不确定性作用下，机间最小间距和障碍净空均呈现随机变化，名义几何条件下的避碰关系不再能够直接代表真实安全性，因此本节进一步将机间碰撞由确定性几何判定改写为概率风险约束，并整理为适用于在线原语评价的代价表达。
+
+对编队中任意两架无人机 $i$ 与 $j$，记其位置随机变量分别为 $x_{i}$ 和 $x_{j}$，碰撞事件记为 $C_{ij}$，则两机碰撞概率可表示为
+\begin{equation}
+P_{ij}^{\mathrm{col}} = \iint I_{C_{ij}}(x_{i}, x_{j}) \, p_{ij}(x_{i}, x_{j}) \, \mathrm{d}x_{i} \, \mathrm{d}x_{j},
+\label{eq:3_1}
+\end{equation}
+其中 $I_{C_{ij}}(x_{i}, x_{j})$ 为碰撞事件示性函数，$p_{ij}(x_{i}, x_{j})$ 为两机位置的联合概率密度函数。在各无人机位置误差相互独立的假设下，$p_{ij}(x_{i}, x_{j}) = p_{i}(x_{i}) p_{j}(x_{j})$。式(\ref{eq:3_1})给出了两机碰撞概率的基本形式，但其仍为关于联合分布的二重积分，难以直接用于在线原语评价。
+
+为得到适用于规划层的解析表达，局部规划层将编队近似为平面正 $N$ 边形。设编队中心为 $c$，中心到各顶点的标称距离为 $d$，缩放因子为 $k$，则第 $i$ 架无人机对应顶点的相位角、单位方向向量和期望位置分别为
+\[
+\begin{aligned}
+\theta_{i} &= \theta_{0} + \frac{2\pi (i-1)}{N}, \qquad i=1,2,\ldots,N,\\
+u_{i} &=
+\begin{bmatrix}
+\cos \theta_{i}\\
+\sin \theta_{i}
+\end{bmatrix},\\
+\mu_{i}(k) &= c + k d \, u_{i}.
+\end{aligned}
+\]
+$k=1$ 对应标称尺度，$k<1$ 表示收缩，$k>1$ 表示扩张。
+
+在上述编队近似下，若各无人机的位置误差相互独立且服从高斯分布，则第 $i$ 架无人机的实际位置、两机相对位置及其分布满足
+\[
+\begin{aligned}
+x_{i} &\sim \mathcal{N}\bigl(\mu_{i}(k), \Sigma_{i}\bigr),\\
+z_{ij} &= x_{i} - x_{j},\\
+z_{ij} &\sim \mathcal{N}\bigl(\mu_{ij}(k), \Sigma_{ij}\bigr),
+\end{aligned}
+\qquad
+\begin{aligned}
+\mu_{ij}(k) &= \mu_{i}(k) - \mu_{j}(k) = k d (u_{i} - u_{j}),\\
+\Sigma_{ij} &= \Sigma_{i} + \Sigma_{j}.
+\end{aligned}
+\]
+由 $\mu_{ij}(k)=k d (u_{i}-u_{j})$ 可见，编队缩放直接作用于两机相对位置分布的均值。
+
+进一步将每架无人机的安全包络近似为半径为 $r_{s}$ 的圆盘，则两机碰撞可等价为两圆盘相交。转到相对坐标空间后，碰撞判定半径、碰撞事件和碰撞概率可写为
+\[
+\begin{aligned}
+R_{c} &= 2 r_{s},\\
+C_{ij}: \|z_{ij}\| &\le R_{c},\\
+P_{ij}^{\mathrm{col}}(k) &= \int_{\|z\|\le R_{c}} p_{z_{ij}}(z) \, \mathrm{d}z,
+\end{aligned}
+\]
+其中 $p_{z_{ij}}(z)$ 为随机变量 $z_{ij}$ 的概率密度函数。
+
+据此，机间碰撞问题被转化为相对位置随机变量进入危险域的概率问题。在小体积近似下，当危险域 $\|z\|\le R_{c}$ 相对于概率密度函数的变化尺度足够小时，可将危险域内的概率密度视为常值，于是有
+\begin{equation}
+P_{ij}^{\mathrm{col}}(k) \approx \pi R_{c}^{2} \, p_{z_{ij}}(0).
+\label{eq:3_13}
+\end{equation}
+由于 $z_{ij}$ 服从二维高斯分布，其概率密度函数及在原点处的取值分别为
+\[
+\begin{aligned}
+p_{z_{ij}}(z) &= \frac{1}{2\pi \sqrt{\det(\Sigma_{ij})}}
+\exp\!\left(-\frac{1}{2}(z-\mu_{ij}(k))^{\top}\Sigma_{ij}^{-1}(z-\mu_{ij}(k))\right),\\
+p_{z_{ij}}(0) &= \frac{1}{2\pi \sqrt{\det(\Sigma_{ij})}}
+\exp\!\left(-\frac{1}{2}\mu_{ij}(k)^{\top}\Sigma_{ij}^{-1}\mu_{ij}(k)\right).
+\end{aligned}
+\]
+代入式(\ref{eq:3_13})可得
+\[
+P_{ij}^{\mathrm{col}}(k) \approx \frac{R_{c}^{2}}{2\sqrt{\det(\Sigma_{ij})}}
+\exp\!\left(-\frac{1}{2}\mu_{ij}(k)^{\top}\Sigma_{ij}^{-1}\mu_{ij}(k)\right).
+\]
+进一步代入 $\mu_{ij}(k) = k d (u_{i}-u_{j})$ 和 $\Sigma_{ij} = \Sigma_{i}+\Sigma_{j}$，得到
+\begin{equation}
+P_{ij}^{\mathrm{col}}(k) \approx \frac{R_{c}^{2}}{2\sqrt{\det(\Sigma_{i}+\Sigma_{j})}}
+\exp\!\left(-\frac{1}{2}k^{2}d^{2}(u_{i}-u_{j})^{\top}(\Sigma_{i}+\Sigma_{j})^{-1}(u_{i}-u_{j})\right).
+\label{eq:3_18}
+\end{equation}
+由式(\ref{eq:3_18})可知，碰撞概率随 $k$ 的减小而升高，且变化规律进入指数项。编队收缩越明显，机间风险增长越快。
+
+对于正 $N$ 边形编队，各无人机对的碰撞概率在函数形式上保持一致，均可写成关于 $k^{2}$ 的指数函数。局部规划层据此将其等效为统一的编队内部碰撞代价
+\begin{equation}
+J_{\mathrm{col}}(k) = \alpha \exp(-\beta k^{2}),
+\label{eq:3_19}
+\end{equation}
+其中 $\alpha>0$ 为比例系数，$\beta>0$ 为由编队几何尺寸、位置不确定性水平和安全间隔共同决定的等效参数。将比例系数吸收到总代价权重后，可简写为 $J_{\mathrm{col}}(k) \propto \exp(-\beta k^{2})$。
+
+\section{考虑位置不确定性的多无人机轨迹规划方法}
+
+据此，位置不确定性下的编队内部碰撞风险被压缩为仅依赖缩放因子 $k$ 的代价项，编队尺度变化与内部风险之间的非线性关系得到显式表达。本节在上述风险建模基础上，给出考虑位置不确定性的多无人机轨迹规划方法，并将碰撞代价嵌入 MP 的构造与选择过程。
+
+在碰撞代价进入原语评价后，局部规划问题可写为目标推进、内部碰撞风险与障碍净空约束的联合优化问题。考虑低空物流场景对实时重规划的要求，采用基于离散 MP 的分层规划框架，将在线原语选择、连续轨迹生成与闭环跟踪统一于滚动规划机制之中。在每个重规划周期内，规划器根据当前编队中心状态、目标方向和局部障碍信息，将路径模板与离散缩放动作映射到当前局部坐标系，对全部候选原语计算目标推进代价、内部碰撞代价和障碍安全裕度代价，选出当前周期内的最优原语，并由其给出局部末端状态；轨迹生成模块再依据该末端状态构造连续参考轨迹，交由底层控制器闭环跟踪。由此，局部规划、轨迹生成与控制执行构成统一的滚动更新链路，上述分层框架也将在线决策限制在有限候选集内，使局部规划开销保持稳定，并在同一规划周期内统一处理风险建模与动力学可执行性。
+
+\subsection{原语构造与评价}
+
+在上述总体框架下，规划层不对各无人机分别独立搜索局部轨迹，而是先规划编队中心在局部时域内的参考运动，再依据标准构型恢复各成员的参考轨迹。设编队中心参考轨迹为 $p_{c}^{\mathrm{ref}}(t)$，标准构型下第 $i$ 架无人机相对于编队中心的相对偏移为 $r_{i}^{0}$，则第 $i$ 架无人机的参考位置为
+\[
+p_{i}^{\mathrm{ref}}(t) = p_{c}^{\mathrm{ref}}(t) + k(t) r_{i}^{0}, \qquad i=1,2,\ldots,N,
+\]
+其中 $k(t)$ 表示当前规划周期内的缩放动作。缩放动作离散为 $k(t) \in \{0.98,\,1.00,\,1.02\}$。
+$k=1.00$ 对应标准尺度，$k<1$ 表示轻微收缩，$k>1$ 表示轻微扩张。
+
+离散 MP 库由路径模板与缩放动作共同构成。MP 描述编队在有限局部时域内可能采取的典型机动。设局部规划坐标系以前向轴为 $x$ 轴，直线型路径模板定义为
+\[
+\rho_{\mathrm{line}}(s) =
+\begin{bmatrix}
+s\\0\\0
+\end{bmatrix}, \qquad s\in[0,L],
+\]
+其中 $L$ 为局部规划长度。
+
+为表征局部绕行与转向，引入曲线型路径模板。对给定弧长 $L$ 和曲率半径 $R$，定义基础圆弧路径
+\[
+\rho_{\mathrm{arc}}(\theta) =
+\begin{bmatrix}
+R\sin\theta\\
+R(1-\cos\theta)\\
+0
+\end{bmatrix}, \qquad
+\theta \in [0,\theta_{\max}], \qquad
+\theta_{\max} = \frac{L}{R}.
+\]
+再将其绕局部前向轴离散旋转。设旋转角为 $\phi$，则对应三维路径模板为
+\[
+\rho_{\mathrm{arc}}^{(\phi)}(\theta) = R_{x}(\phi) \, \rho_{\mathrm{arc}}(\theta),
+\]
+其中 $R_{x}(\phi)$ 为绕局部 $x$ 轴的旋转矩阵。对 $\phi$ 进行有限采样后，可得到覆盖不同侧向绕行方向的模板集合 $M$。
+
+将路径模板集合与离散缩放动作组合，得到完整 MP 库。单个原语记为 $\pi = (\rho, k)$，其中 $\rho\in M$、$k\in\{0.98,1.00,1.02\}$，因此完整原语集合可写为 $\Pi = M \times \{0.98,1.00,1.02\}$。任一原语同时给出局部路径机动和编队尺度变化。
+
+上述原语集覆盖局部重规划中最常出现的前向推进、侧向绕行与轻微尺度调整三类动作，并作为在线计划的候选集合。原语数量在有限范围内保持稳定，在线评价可在固定规模候选集上进行。
+
+原语库在局部坐标系下预先构造。每个重规划周期开始时，根据当前任务方向把原语映射到全局空间。设当前规划时刻为 $t$，编队中心位置为 $p_{c}(t)$，当前对齐方向单位向量为 $d(t)$，构造旋转矩阵 $R(t)$ 使局部前向轴与 $d(t)$ 对齐，则候选原语 $\pi=(\rho,k)$ 对应的编队中心候选轨迹写为
+\[
+p_{c,\pi}(\tau) = p_{c}(t) + R(t)\rho(\tau),
+\]
+其中 $\tau$ 为局部时域内的路径参数。由构型映射关系，第 $i$ 架无人机在该原语下的候选轨迹为
+\[
+p_{i,\pi}(\tau) = p_{c,\pi}(\tau) + k r_{i}^{0}, \qquad i=1,2,\ldots,N.
+\]
+
+原语选择阶段需要对全部候选动作统一评价。设环境障碍表面离散点集为 $P_{\mathrm{obs}}$，则候选原语 $\pi$ 在整个局部执行区间内与障碍物的最小距离定义为
+\[
+d_{\min}^{\mathrm{obs}}(\pi) = \min_{i\in\{1,\ldots,N\}}\;\min_{\tau}\;\min_{q\in P_{\mathrm{obs}}} \|p_{i,\pi}(\tau)-q\|.
+\]
+该量给出候选原语在当前周期内的最小障碍净空。
+
+候选原语的总代价定义为
+\[
+J(\pi) = J_{\mathrm{goal}}(\pi) + J_{\mathrm{col}}(\pi) + J_{\mathrm{obs}}(\pi),
+\]
+其中 $J_{\mathrm{goal}}(\pi)$ 为目标推进项，$J_{\mathrm{col}}(\pi)$ 为编队内部碰撞代价，$J_{\mathrm{obs}}(\pi)$ 为障碍安全裕度代价。目标推进项采用候选原语末端编队中心位置与目标点之间的距离，即 $J_{\mathrm{goal}}(\pi)=\|p_{c,\pi}^{\mathrm{end}} - p_{g}\|$，其中 $p_{c,\pi}^{\mathrm{end}}$ 为原语 $\pi$ 对应的编队中心末端位置，$p_{g}$ 为目标点。编队内部碰撞代价沿用上一节结果，并直接使用原语中的缩放因子 $k$，即 $J_{\mathrm{col}}(\pi)=\alpha \exp(-\beta k^{2})$，其中 $\alpha$ 为比例系数，$\beta$ 为由编队几何尺度、位置不确定性水平和安全间隔共同决定的等效参数。$k$ 减小时，该代价单调增大。障碍安全裕度代价中，先定义 $\Delta(\pi)=d_{\min}^{\mathrm{obs}}(\pi)-r_{\mathrm{safe}}(k)$，再取 $J_{\mathrm{obs}}(\pi)=\max\{0,\, d_{\mathrm{buf}}-\Delta(\pi)\}$，其中 $r_{\mathrm{safe}}(k)$ 为缩放因子 $k$ 下的有效安全边界，$d_{\mathrm{buf}}$ 为障碍缓冲距离。
+
+上述总代价由目标推进、内部碰撞与障碍安全裕度三部分构成。$J_{\mathrm{goal}}(\pi)$ 表征原语末端对任务目标的接近程度，$J_{\mathrm{col}}(\pi)$ 表征缩放动作对应的机间风险，$J_{\mathrm{obs}}(\pi)$ 表征编队与外部障碍之间的最小净空。三项代价在同一评价框架下共同决定当前周期的原语选择结果。
+
+当前重规划周期内的最优原语由 $\pi^{*} = \arg\min_{\pi\in\Pi} J(\pi)$ 确定。设其对应的编队中心末端位置为 $p_{c,\pi^{*}}^{\mathrm{end}}$，缩放因子为 $k^{*}$，则第 $i$ 架无人机在该周期末端的参考位置满足
+\[
+p_{i}^{\mathrm{end}} = p_{c,\pi^{*}}^{\mathrm{end}} + k^{*} r_{i}^{0}, \qquad i=1,2,\ldots,N.
+\]
+
+\subsection{轨迹生成与跟踪}
+
+在最优原语确定后，为将离散末端状态转化为连续可执行轨迹，进一步采用 minimum snap 方法构造各无人机的局部参考轨迹。设第 $i$ 架无人机当前状态为 $x_{i}(t) = [p_{i}(t), v_{i}(t), a_{i}(t)]$，其中 $p_{i}(t)$、$v_{i}(t)$ 和 $a_{i}(t)$ 分别表示当前位置、速度和加速度。以当前状态作为起始边界，以 $p_{i}^{\mathrm{end}}$ 作为终端位置边界，并令终端速度与终端加速度为零，即 $v_{i}(T)=0$、$a_{i}(T)=0$，则第 $i$ 架无人机的局部参考轨迹可通过求解
+\[
+\min_{p_{i}^{\mathrm{ref}}(t)} \int_{t}^{T} \left\|\frac{\mathrm{d}^{4} p_{i}^{\mathrm{ref}}(\tau)}{\mathrm{d}\tau^{4}}\right\|^{2} \mathrm{d}\tau
+\]
+获得，其边界条件为
+\[
+\begin{aligned}
+p_{i}^{\mathrm{ref}}(t) &= p_{i}(t), \qquad &p_{i}^{\mathrm{ref}}(T) &= p_{i}^{\mathrm{end}},\\
+\dot{p}_{i}^{\mathrm{ref}}(t) &= v_{i}(t), \qquad &\ddot{p}_{i}^{\mathrm{ref}}(t) &= a_{i}(t),\\
+\dot{p}_{i}^{\mathrm{ref}}(T) &= 0, \qquad &\ddot{p}_{i}^{\mathrm{ref}}(T) &= 0.
+\end{aligned}
+\]
+
+执行层采用 SE(3) 几何控制器跟踪上述参考轨迹。设第 $i$ 架无人机的位置误差和速度误差分别为 $e_{p,i} = p_{i} - p_{i}^{\mathrm{ref}}$ 和 $e_{v,i} = v_{i} - \dot{p}_{i}^{\mathrm{ref}}$，则其期望平动控制量为
+\[
+f_{i}^{*} = -m_{i} k_{p} e_{p,i} - m_{i} k_{v} e_{v,i} + m_{i} g e_{3} + m_{i} \ddot{p}_{i}^{\mathrm{ref}},
+\]
+其中 $m_{i}$ 为无人机质量，$k_{p}$ 和 $k_{v}$ 分别为位置与速度反馈增益，$g$ 为重力加速度，$e_{3} = [0,0,1]^{\top}$。控制器进一步结合姿态误差生成姿态与推力指令，实现闭环跟踪。
+
+minimum snap 轨迹生成与 SE(3) 控制器共同完成局部规划结果向执行层的转换。原语选择给出局部时域内的末端几何目标，minimum snap 模块据此生成满足速度和加速度边界条件的参考轨迹，底层控制器再依据轨迹误差完成闭环跟踪，规划层与执行层通过参考轨迹接口衔接。规划与执行流程因此包括原语构造、代价评价、连续轨迹生成和 SE(3) 跟踪控制四个环节，编队在每个重规划周期内重复上述过程，局部状态、障碍净空和缩放动作随滚动时域持续更新。在窄缝穿越过程中，最优缩放比、障碍净空和成员相对位置均随环境约束变化，规划器在各周期内重新完成目标推进、编队尺度与安全裕度的联合权衡，由此形成面向受限空间的滚动规划机制。
+
+\section{仿真验证}
+
+为验证所提方法在受限通道中的适用性，本节在 PyBullet 物理引擎中构建四机编队窄缝穿越场景。仿真实验在 Ubuntu 22.04 平台上完成，硬件配置为 Intel Core i9-13900KF 处理器和 62 GiB 内存。编队采用标称构型间距为 $0.8\,\mathrm{m}$ 的四机编队，编队中心从 $(-3.0,0.0,1.5)\,\mathrm{m}$ 飞向 $(3.0,0.0,1.5)\,\mathrm{m}$；场景中部布置两块静态长方体障碍物，形成宽度为 $1.4\,\mathrm{m}$ 的通道，用于考察编队在狭窄环境中的尺度调整、最小净空和通过时间。该场景对应本章讨论的受限空间穿越问题。标称尺度下的编队难以直接通过窄缝，而完全分散的独立规避又会削弱编队保持与整体推进效率，因此窄缝场景能够较集中地反映不同规划方法在局部形变、协同一致性和安全约束处理上的差异。其余主要实验参数见表~\ref{tab:formation_mp_sim_setup}。
+
+\setlength{\textfloatsep}{10bp plus 2bp minus 2bp}
+\setlength{\floatsep}{10bp plus 2bp minus 2bp}
+\setlength{\intextsep}{10bp plus 2bp minus 2bp}
+
+\begin{table}[!htbp]
+    \centering
+    \caption{主要实验参数}
+    \label{tab:formation_mp_sim_setup}
+    \renewcommand{\arraystretch}{1.15}
+    \begin{tabular}{p{0.30\textwidth}p{0.25\textwidth}p{0.20\textwidth}}
+        \toprule
+        参数 & 数值 & 单位/说明 \\
+        \midrule
+        无人机模型 & Crazyflie 2.0 X（cf2x） & 型号 \\
+        无人机数量 & 4 & 架 \\
+        单机质量 & 0.027 & kg \\
+        机臂长度 & 0.0397 & m \\
+        最大速度 & 30 & km/h \\
+        碰撞包络半径 & 0.06 & m \\
+        仿真频率 & 240 & Hz \\
+        控制频率 & 48 & Hz \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+对比对象包括所提方法、分布式 MP 和刚性编队 MP。所提方法在局部规划中允许编队按需收缩或恢复；分布式 MP 将各无人机视为独立规划个体，不显式协调整体尺度；刚性编队 MP 始终保持固定构型，只调整整体运动方向。定性分析使用俯视轨迹图、三维轨迹图和安全距离变化图，定量分析采用最小机间距离、最小障碍净空距离和任务完成时间三个指标。其中，最小机间距离用于衡量穿越过程中编队内部的安全裕度，最小障碍净空距离反映编队与外部障碍之间的保守程度，任务完成时间则直接对应局部通道通过效率。三项指标共同构成“内部安全性、外部安全性和任务效率”的统一评价维度，用于比较不同规划方法在受限空间中的取舍关系。
+
+\begin{figure}[!htbp]
+    \centering
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{pic/part2pic/MP_top1.4.png}
+        \makebox[\linewidth][c]{\small\mbox{（a）俯视轨迹}}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{pic/part2pic/MP_3d.png}
+        \makebox[\linewidth][c]{\small\mbox{（b）三维轨迹}}
+    \end{minipage}
+    \caption{所提方法的仿真轨迹图}
+    \label{fig:elastic_formation_mp_trajectory}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\textwidth]{pic/part2pic/MP_safety.png}
+    \caption{所提方法的安全距离变化示意图}
+    \label{fig:elastic_formation_mp_safety}
+\end{figure}
+
+图~\ref{fig:elastic_formation_mp_trajectory} 说明了所提方法的轨迹演化过程。编队在接近窄缝前开始收缩横向占据宽度，上下两侧无人机逐步向编队中心靠拢，穿越后再向各自目标构型附近恢复，且收缩动作主要集中在障碍邻域，穿越过程中始终沿统一任务方向推进。图~\ref{fig:elastic_formation_mp_safety} 说明了所提方法在穿越过程中的安全距离变化规律。最小机间距离和最小障碍净空距离在穿越阶段同步下降，但全程均保持正值；程序记录的最小缩放比为 $0.437$，与轨迹中的局部收缩过程相一致，说明编队尺度调整主要发生在通道邻域，离开受限空间后轨迹逐步恢复至接近标称构型的运行状态，受限空间约束也被限制在局部时域内处理。
+
+\begin{figure}[!htbp]
+    \centering
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{pic/part2pic/mp_independent_top.png}
+        \makebox[\linewidth][c]{\small\mbox{（a）俯视轨迹}}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{pic/part2pic/mp_independent_3d.png}
+        \makebox[\linewidth][c]{\small\mbox{（b）三维轨迹}}
+    \end{minipage}
+    \caption{分布式 MP 的仿真轨迹图}
+    \label{fig:distributed_mp_trajectory}
+\end{figure}
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.7\textwidth]{pic/part2pic/mp_independent_safety.png}
+    \caption{分布式 MP 的安全距离变化示意图}
+    \label{fig:distributed_mp_safety}
+\end{figure}
+
+图~\ref{fig:distributed_mp_trajectory} 说明了分布式 MP 的轨迹演化特征。各无人机围绕自身局部目标独立调整轨迹，虽均能通过障碍并到达目标附近，但穿越过程中队形被明显拉开，障碍前后伴随额外横向修正，穿缝阶段缺少统一的构型收缩动作，轨迹分布较所提方法更为分散。图~\ref{fig:distributed_mp_safety} 说明了分布式 MP 的安全距离变化结果。该方法的最小机间距离和最小障碍净空距离均大于所提方法，说明独立规划保留了更大的局部安全裕度，但整体占据范围未得到有效压缩，到达目标区域所需时间也相应增加。
+
+\begin{figure}[!htbp]
+    \centering
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{pic/part2pic/fixed_formationMP_top.png}
+        \makebox[\linewidth][c]{\small\mbox{（a）俯视轨迹}}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{pic/part2pic/fixed_formationMP_3d.png}
+        \makebox[\linewidth][c]{\small\mbox{（b）三维轨迹}}
+    \end{minipage}
+    \caption{刚性编队 MP 的仿真轨迹图}
+    \label{fig:rigid_formation_mp_trajectory}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\textwidth]{pic/part2pic/fixed_formationMP_safety.png}
+    \caption{刚性编队 MP 的安全距离变化示意图}
+    \label{fig:rigid_formation_mp_safety}
+\end{figure}
+
+图~\ref{fig:rigid_formation_mp_trajectory} 说明了刚性编队 MP 的轨迹演化特征。固定尺度使编队无法通过收缩降低横向占据宽度，编队在窄缝前放弃直接穿越，转而从障碍物上方大幅绕行，俯视轨迹保持原有横向展开形式，三维轨迹则通过明显抬升和延长航迹来绕开受限通道。图~\ref{fig:rigid_formation_mp_safety} 说明了刚性编队 MP 的安全距离变化结果。最小机间距离曲线近似保持常值，对应全过程中的编队尺度基本不变，最小障碍净空距离整体大于所提方法，较大的安全余量由额外绕行距离换得。综合三组结果可以看出，所提方法在受限空间内通过局部收缩保持整体协同，分布式 MP 通过个体主导的分散规避获得较大的局部安全裕度，刚性编队 MP 则通过明显绕行维持固定构型，不同方法在形变能力、协同一致性与通行效率上的差异在窄缝场景中得到集中体现。
+
+\begin{table}[!htbp]
+    \centering
+    \caption{三种方法的定量结果比较}
+    \label{tab:formation_mp_metrics}
+    \renewcommand{\arraystretch}{1.15}
+    \begin{tabular}{p{0.28\textwidth}p{0.20\textwidth}p{0.22\textwidth}p{0.18\textwidth}}
+        \toprule
+        方法 & 最小机间距离 / m & 最小障碍净空距离 / m & 任务完成时间 / s \\
+        \midrule
+        所提方法 & 0.316 & 0.318 & 4.062 \\
+        分布式 MP & 0.580 & 0.368 & 5.708 \\
+        刚性编队 MP & 0.786 & 0.388 & 8.750 \\
+        \bottomrule
+    \end{tabular}
+    \par\smallskip
+    {\footnotesize 注：距离单位为 m，时间单位为 s。}
+\end{table}
+
+表~\ref{tab:formation_mp_metrics} 汇总了三种方法的定量结果。刚性编队 MP 和分布式 MP 的最小机间距离与最小障碍净空距离均大于所提方法。刚性编队 MP 的最小机间距离达到 $0.786\,\mathrm{m}$，对应固定构型下较大的机间展开尺度；分布式 MP 的最小机间距离和最小障碍净空距离分别为 $0.580\,\mathrm{m}$ 和 $0.368\,\mathrm{m}$；所提方法的两项指标分别为 $0.316\,\mathrm{m}$ 和 $0.318\,\mathrm{m}$。尽管该方法的安全指标更小，但全程均保持正值，说明编队在收缩穿越阶段仍保有必要安全余量。任务完成时间进一步反映了三种方法的效率差异。所提方法仅需 $4.062\,\mathrm{s}$ 即可完成任务，比分布式 MP 缩短 $28.84\%$，比刚性编队 MP 缩短 $53.58\%$。分布式 MP 虽然避免了刚性编队的大幅绕行，但缺少统一的尺度协调，成员之间的局部修正增加了整体推进时间；刚性编队 MP 无法直接穿越窄缝，被迫采用远距离绕行，耗时最长。定量结果与轨迹变化相一致，说明所提方法在编队保持、通行能力与任务效率之间取得了更均衡的结果，也更符合低空物流受限空间通行任务对效率与协同的共同要求。
+
+为进一步考察所提方法对不同通道尺度的适应能力，在其余条件不变的情况下，将窄缝宽度分别设置为 $1.0\,\mathrm{m}$、$1.4\,\mathrm{m}$ 和 $1.8\,\mathrm{m}$。图~\ref{fig:elastic_gap_width_topviews} 给出了三种宽度下的俯视轨迹。窄缝宽度减小到 $1.0\,\mathrm{m}$ 时，编队在进入通道前出现更明显的向内收缩，穿缝阶段的横向占据宽度也随之减小；当窄缝宽度为 $1.4\,\mathrm{m}$ 时，编队仍保持清晰的收缩与恢复过程；宽度增大到 $1.8\,\mathrm{m}$ 时，轨迹更接近标称构型，收缩程度明显减弱。
+
+\begin{figure}[!htbp]
+    \centering
+    
+    % 第一排：前两张图并列
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{pic/part2pic/MP_top.png}
+        \makebox[\linewidth][c]{\small\mbox{（a）缝宽 1.0 m}}
+    \end{minipage}
+    \hfill % 撑开两图之间的水平间距
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{pic/part2pic/MP_top1.4.png}
+        \makebox[\linewidth][c]{\small\mbox{（b）缝宽 1.4 m}}
+    \end{minipage}
+    
+    \vspace{0.6em}
+    
+    % 第二排：第三张图自动居中
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{pic/part2pic/MP_top1.8.png}
+        \makebox[\linewidth][c]{\small\mbox{（c）缝宽 1.8 m}}
+    \end{minipage}
+    
+    \caption{不同缝宽下所提方法的仿真结果示意}
+    \label{fig:elastic_gap_width_topviews}
+\end{figure}
+
+
+
+\begin{table}[!htbp]
+    \centering
+    \caption{所提方法在不同窄缝宽度下的结果比较}
+    \label{tab:elastic_gap_width_metrics}
+    \renewcommand{\arraystretch}{1.15}
+    \begin{tabular}{p{0.18\textwidth}p{0.18\textwidth}p{0.18\textwidth}p{0.20\textwidth}p{0.16\textwidth}}
+        \toprule
+        窄缝宽度 / m & 最小缩放比（无量纲） & 最小机间距离 / m & 最小障碍净空距离 / m & 完成时间 / s \\
+        \midrule
+        1.0 & 0.346 & 0.234 & 0.193 & 4.833 \\
+        1.4 & 0.437 & 0.316 & 0.318 & 4.062 \\
+        1.8 & 0.591 & 0.442 & 0.416 & 3.979 \\
+        \bottomrule
+    \end{tabular}
+    \par\smallskip
+    {\footnotesize 注：除最小缩放比为无量纲量外，距离单位为 m，时间单位为 s。}
+\end{table}
+
+表~\ref{tab:elastic_gap_width_metrics} 给出了不同通道宽度下的定量结果。随着窄缝宽度从 $1.0\,\mathrm{m}$ 增加到 $1.8\,\mathrm{m}$，最小缩放比由 $0.346$ 增加到 $0.591$，最小机间距离和最小障碍净空距离分别由 $0.234\,\mathrm{m}$ 和 $0.193\,\mathrm{m}$ 提升到 $0.442\,\mathrm{m}$ 和 $0.416\,\mathrm{m}$，任务完成时间由 $4.833\,\mathrm{s}$ 降至 $3.979\,\mathrm{s}$。通道尺度增宽后，编队对收缩动作的需求减弱，安全裕度和通过效率同步提高。在最窄的 $1.0\,\mathrm{m}$ 通道条件下，所提方法仍可通过主动收缩完成穿越，且机间距离和障碍净空始终为正；随着通道宽度增加，编队收缩幅度逐步减小，轨迹恢复至更接近标称构型的通行方式。不同通道宽度下的结果表明，缩放动作随空间约束连续变化。通道收窄时，最小缩放比与安全裕度同步下降，任务完成时间增加；通道增宽时，轨迹逐步回到接近标称构型的直穿模式，由此可见，所提方法能够在不同受限空间尺度下给出相应的编队形变策略。
+
+\section{本章小结}
+
+本章围绕低空物流场景中编队穿越受限空间时的局部轨迹规划问题，提出了考虑位置不确定性的多无人机轨迹规划方法。针对受限空间内机间间距和障碍净空受位置偏差共同影响的特点，本章在独立高斯误差假设下构造编队内部碰撞概率模型，并将其整理为关于缩放因子的碰撞代价。在此基础上，构造包含路径模板与缩放动作的 MP 库，并在原语选择中统一考虑目标推进、内部避碰和障碍安全裕度，再结合 minimum snap 轨迹生成与 SE(3) 跟踪控制完成局部轨迹执行。PyBullet 对比仿真及不同通道宽度下的补充实验表明，所提方法能够在满足基本安全约束的前提下缩短受限空间通过时间，并对不同尺度的通道保持稳定适应能力，为低空物流系统在复杂障碍环境中的编队通行与局部重规划提供了方法支撑。

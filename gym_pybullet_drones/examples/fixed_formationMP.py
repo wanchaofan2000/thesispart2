@@ -32,18 +32,31 @@ from gym_pybullet_drones.examples.obstacles import (
     DEFAULT_CAMERA_DISTANCE,
     build_narrow_gap_kdtree,
 )
+from gym_pybullet_drones.examples.plot_record_utils import (
+    DEFAULT_LOG_DIR,
+    get_obstacle_box_specs,
+    plot_3d_trajectories,
+    plot_safety_histories,
+    plot_top_view_trajectories,
+    resolve_output_path,
+    save_summary_text,
+    save_thesis_figure,
+)
 
 
 def generate_directional_path_library(
     arc_lengths=None,
     arc_radii=None,
-    delta_angle_deg=30
+    delta_angle_deg=30,
+    lateral_offsets=None,
 ):
     """生成仅含方向变化的运动原语库（无缩放因子）。"""
     if arc_lengths is None:
         arc_lengths = [0.6]
     if arc_radii is None:
-        arc_radii = [np.inf, 60.0, 30.0, 18.0, 12.0, 8.0, 6.0, 4.0]
+        arc_radii = [np.inf,60, 30, 18.0, 12.0, 8.0, 6.0, 4.0, 3.0, 2.0, 1.0, 0.5, 0.2]
+    if lateral_offsets is None:
+        lateral_offsets = [0.3, 0.5, 0.7]
 
     base_paths = []
     for radius in arc_radii:
@@ -63,6 +76,14 @@ def generate_directional_path_library(
                 for angle in range(0, 360, delta_angle_deg):
                     rot = R.from_euler('x', angle, degrees=True).as_matrix()
                     base_paths.append((rot @ arc.T).T)
+
+    for lateral in lateral_offsets:
+        t = np.linspace(0.0, 1.0, 12)
+        x = np.zeros_like(t)
+        z = np.zeros_like(t)
+        for sign in (-1.0, 1.0):
+            y = sign * lateral * t
+            base_paths.append(np.stack([x, y, z], axis=1))
     return np.array(base_paths)
 
 
@@ -79,44 +100,58 @@ DEFAULT_USER_DEBUG_GUI = False
 DEFAULT_OBSTACLES = False
 DEFAULT_SIMULATION_FREQ_HZ = 240
 DEFAULT_CONTROL_FREQ_HZ = 48
-DEFAULT_DURATION_SEC = 12
-DEFAULT_OUTPUT_FOLDER = "results"
+DEFAULT_DURATION_SEC = 20
+DEFAULT_OUTPUT_FOLDER = str(DEFAULT_LOG_DIR)
 DEFAULT_COLAB = False
-DEFAULT_LEADER_SAFE_RADIUS = 1.3
 DEFAULT_SUCCESS_THRESHOLD = 0.4
 DEFAULT_DETOUR_RATIO = 1.15
+DEFAULT_DRONE_COLLISION_RADIUS = 0.06
+DEFAULT_DRONE_SIZE = 2.0 * DEFAULT_DRONE_COLLISION_RADIUS
+DEFAULT_RIGID_EXTRA_MARGIN = 4.0 * DEFAULT_DRONE_SIZE
+DEFAULT_GROUND_Z = 0.0
+DEFAULT_MIN_GROUND_CLEARANCE = DEFAULT_DRONE_SIZE
+DEFAULT_Z_MOTION_PENALTY_WEIGHT = 2.0
+DEFAULT_EXECUTION_DISTANCE = 0.30
+DEFAULT_FINAL_APPROACH_DISTANCE = 1.00
 
 OBSTACLE_POINTS = None
 OBSTACLE_KD_TREE = None
 
 
-def _compute_obstacle_penalties(rotated_paths,
-                                current_pos,
-                                kd_tree,
-                                leader_safe_radius,
-                                lambda_obs=3.0):
-    """基于固定安全半径计算路径障碍惩罚。"""
+def _compute_endpoint_collision_mask(endpoints,
+                                     kd_tree,
+                                     formation_safe_radius):
+    """Reject primitives whose endpoint circumcircle overlaps the obstacle point cloud."""
     if kd_tree is None:
-        return np.zeros(rotated_paths.shape[0])
+        return np.zeros(endpoints.shape[0], dtype=bool)
 
-    penalties = np.zeros(rotated_paths.shape[0])
-    for idx in range(rotated_paths.shape[0]):
-        path_world = rotated_paths[idx] + current_pos
-        dists, _ = kd_tree.query(path_world, k=1)
-        min_dist = float(np.min(dists))
-        clearance = min_dist - leader_safe_radius
-        penalties[idx] = lambda_obs * (-clearance) if clearance < 0 else 0.0
-    return penalties
+    dists, _ = kd_tree.query(endpoints, k=1)
+    return dists <= formation_safe_radius
+
+
+def _compute_ground_collision_mask(endpoints,
+                                   ground_z=DEFAULT_GROUND_Z,
+                                   min_ground_clearance=DEFAULT_MIN_GROUND_CLEARANCE):
+    """Reject primitives whose endpoint flies too close to the ground plane."""
+    return endpoints[:, 2] <= (ground_z + min_ground_clearance)
+
+
+def _compute_z_motion_penalties(rotated_paths, current_pos, penalty_weight=DEFAULT_Z_MOTION_PENALTY_WEIGHT):
+    """Penalize any vertical motion to prefer planar detours over climbing or diving."""
+    world_paths_z = rotated_paths[:, :, 2] + current_pos[2]
+    max_vertical_motion = np.max(np.abs(world_paths_z - current_pos[2]), axis=1)
+    return penalty_weight * max_vertical_motion
 
 
 def _compute_alignment_direction(direction_to_target, current_vel, t_now):
+    target_dir = direction_to_target / np.linalg.norm(direction_to_target)
     if t_now < 0.4:
-        return direction_to_target / np.linalg.norm(direction_to_target)
+        return target_dir
 
     v_norm = np.linalg.norm(current_vel)
     if v_norm > 1e-3:
         return current_vel / v_norm
-    return direction_to_target / np.linalg.norm(direction_to_target)
+    return target_dir
 
 
 def _rotation_from_x_axis(target_direction):
@@ -140,12 +175,18 @@ def _select_leader_goal(current_pos,
                         step,
                         env,
                         paths,
-                        leader_safe_radius):
-    """仅方向原语选择下一目标点（无编队缩放）。"""
+                        formation_safe_radius):
+    """Direction-only local planner with obstacle and ground endpoint rejection."""
     direction_to_target = center_goal - current_pos
     distance_to_target = np.linalg.norm(direction_to_target)
     if distance_to_target < DEFAULT_SUCCESS_THRESHOLD:
         return center_goal
+    if distance_to_target < DEFAULT_FINAL_APPROACH_DISTANCE:
+        return current_pos + (
+            min(DEFAULT_EXECUTION_DISTANCE, distance_to_target)
+            * direction_to_target
+            / distance_to_target
+        )
 
     t_now = step * env.CTRL_TIMESTEP
     align_dir = _compute_alignment_direction(direction_to_target, current_vel, t_now)
@@ -154,11 +195,17 @@ def _select_leader_goal(current_pos,
     rotated_paths = paths @ rot_matrix.T
     endpoints = rotated_paths[:, -1, :] + current_pos
     goal_dists = np.linalg.norm(endpoints - center_goal, axis=1)
-    obstacle_penalties = _compute_obstacle_penalties(rotated_paths,
-                                                     current_pos,
-                                                     OBSTACLE_KD_TREE,
-                                                     leader_safe_radius)
-    total_costs = goal_dists + obstacle_penalties
+    z_motion_penalties = _compute_z_motion_penalties(rotated_paths, current_pos)
+    obstacle_collision_mask = _compute_endpoint_collision_mask(endpoints,
+                                                               OBSTACLE_KD_TREE,
+                                                               formation_safe_radius)
+    ground_collision_mask = _compute_ground_collision_mask(endpoints)
+    collision_mask = obstacle_collision_mask | ground_collision_mask
+    feasible_mask = ~collision_mask
+    if not np.any(feasible_mask):
+        return current_pos
+
+    total_costs = np.where(feasible_mask, goal_dists + z_motion_penalties, np.inf)
     best_idx = np.argmin(total_costs)
     return endpoints[best_idx]
 
@@ -170,15 +217,45 @@ def _path_length(path_points):
     return float(np.sum(np.linalg.norm(diffs, axis=1)))
 
 
+def _pairwise_min_distance(positions):
+    if len(positions) < 2:
+        return np.inf
+
+    min_dist = np.inf
+    for i in range(len(positions)):
+        for j in range(i + 1, len(positions)):
+            dist = float(np.linalg.norm(positions[i] - positions[j]))
+            if dist < min_dist:
+                min_dist = dist
+    return min_dist
+
+
+def _min_obstacle_clearance(positions, kd_tree, drone_radius):
+    if kd_tree is None or len(positions) == 0:
+        return np.inf
+    dists, _ = kd_tree.query(np.asarray(positions), k=1)
+    return float(np.min(dists) - drone_radius)
+
+
+def _formation_circumradius(base_offsets):
+    """Return the rigid formation circumradius around the leader reference point."""
+    return float(np.max(np.linalg.norm(base_offsets, axis=1)))
+
+
+def _rigid_collision_radius(base_offsets):
+    """Use circumradius plus four drone sizes for conservative rigid-formation rejection."""
+    return _formation_circumradius(base_offsets) + DEFAULT_RIGID_EXTRA_MARGIN
+
+
 def _plot_goal_distance(goal_distance_history):
     if not goal_distance_history:
         return
     ts, ds = zip(*goal_distance_history)
     plt.figure()
-    plt.plot(ts, ds, label="Leader distance to goal")
-    plt.xlabel("Time [s]")
-    plt.ylabel("Distance [m]")
-    plt.title("Direction-only experiment: distance to goal")
+    plt.plot(ts, ds, label="领导者到目标点距离")
+    plt.xlabel("时间 [s]")
+    plt.ylabel("距离 [m]")
+    plt.title("刚性编队运动原语方法目标距离变化曲线")
     plt.grid(True, linestyle="--", alpha=0.4)
     plt.legend()
 
@@ -201,8 +278,8 @@ def run(
     """主仿真入口：仅方向原语的窄缝对比实验。"""
     global OBSTACLE_POINTS, OBSTACLE_KD_TREE
 
-    center_start = np.array([-6.0, 0.0, 1.5])
-    center_goal = np.array([6.0, 0.0, 1.5])
+    center_start = np.array([-3.0, 0.1, 1.5])
+    center_goal = np.array([3.0, 0.1, 1.5])
 
     triangle_offset = 0.8
     sqrt3_over_2 = np.sqrt(3) / 2
@@ -217,6 +294,10 @@ def run(
 
     init_xyzs = center_start + base_offsets
     init_rpys = np.zeros((num_drones, 3))
+    nominal_goals = center_goal + base_offsets
+    output_path = resolve_output_path(output_folder)
+    obstacle_specs = get_obstacle_box_specs()
+    rigid_formation_radius = _rigid_collision_radius(base_offsets)
 
     leader_indices = [0]
     follower_indices = {0: [1, 2, 3]}
@@ -234,11 +315,15 @@ def run(
         record=record_video,
         obstacles=obstacles,
         user_debug_gui=user_debug_gui,
+        output_folder=str(output_path),
     )
 
     time.sleep(1)
     pyb_client = env.getPyBulletClient()
-    OBSTACLE_POINTS, OBSTACLE_KD_TREE = build_narrow_gap_kdtree(pyb_client)
+    OBSTACLE_POINTS, OBSTACLE_KD_TREE = build_narrow_gap_kdtree(
+        pyb_client,
+        sample_volume=True,
+    )
 
     if gui:
         p.resetDebugVisualizerCamera(
@@ -252,7 +337,7 @@ def run(
     logger = Logger(
         logging_freq_hz=control_freq_hz,
         num_drones=num_drones,
-        output_folder=output_folder,
+        output_folder=str(output_path),
         colab=colab,
     )
     controllers = [DSLPIDControl(drone_model=drone) for _ in range(num_drones)]
@@ -262,16 +347,30 @@ def run(
 
     leader_positions = []
     goal_distance_history = []
+    trajectory_histories = [[] for _ in range(num_drones)]
+    min_pair_distance_history = []
+    min_obstacle_clearance_history = []
+    completion_time_sec = None
 
     last_obs = None
     for step in range(int(duration_sec * env.CTRL_FREQ)):
         obs, _, _, _, _ = env.step(action)
         last_obs = obs
         best_goals = np.array([obs[i][:3] for i in range(num_drones)])
+        positions = np.array([obs[i][:3] for i in range(num_drones)])
+        for drone_id in range(num_drones):
+            trajectory_histories[drone_id].append(positions[drone_id].copy())
+        min_pair_distance_history.append((step / env.CTRL_FREQ, _pairwise_min_distance(positions)))
+        min_obstacle_clearance_history.append(
+            (step / env.CTRL_FREQ, _min_obstacle_clearance(positions, OBSTACLE_KD_TREE, DEFAULT_DRONE_COLLISION_RADIUS))
+        )
 
         leader_pos = obs[0][:3]
         leader_positions.append(leader_pos.copy())
         goal_distance_history.append((step / env.CTRL_FREQ, float(np.linalg.norm(center_goal - leader_pos))))
+        if completion_time_sec is None and np.linalg.norm(center_goal - leader_pos) < DEFAULT_SUCCESS_THRESHOLD:
+            completion_time_sec = step / env.CTRL_FREQ
+            break
 
         for leader in leader_indices:
             current_pos = obs[leader][:3]
@@ -282,7 +381,7 @@ def run(
                                             step=step,
                                             env=env,
                                             paths=path_library,
-                                            leader_safe_radius=DEFAULT_LEADER_SAFE_RADIUS)
+                                            formation_safe_radius=rigid_formation_radius)
             best_goals[leader] = best_goal
 
             for j, follower in enumerate(follower_indices[leader]):
@@ -317,22 +416,91 @@ def run(
     detour = traveled > DEFAULT_DETOUR_RATIO * straight
 
     env.close()
+    if last_obs is None:
+        final_positions = init_xyzs.copy()
+    else:
+        final_positions = np.array([last_obs[i][:3] for i in range(num_drones)])
+    final_goal_dists = np.linalg.norm(nominal_goals - final_positions, axis=1)
+    min_pair_distance = (
+        float(min(value for _, value in min_pair_distance_history))
+        if min_pair_distance_history
+        else np.inf
+    )
+    min_obstacle_clearance = (
+        float(min(value for _, value in min_obstacle_clearance_history))
+        if min_obstacle_clearance_history
+        else np.inf
+    )
+    final_sim_time_sec = (
+        completion_time_sec
+        if completion_time_sec is not None
+        else (float(min_pair_distance_history[-1][0]) if min_pair_distance_history else 0.0)
+    )
+
+    summary_lines = [
+        "=== Fixed formation motion primitives summary ===",
+        f"Reached goal (<{DEFAULT_SUCCESS_THRESHOLD:.2f} m): {reached}",
+        (
+            f"Completion time [s]: {completion_time_sec:.3f}"
+            if completion_time_sec is not None
+            else f"Completion time [s]: not reached (ran to {final_sim_time_sec:.3f})"
+        ),
+        f"Final leader distance to goal [m]: {final_dist:.3f}",
+        f"Final goal distances [m]: {np.array2string(final_goal_dists, precision=3)}",
+        f"Rigid formation collision radius [m]: {rigid_formation_radius:.3f}",
+        f"Leader traveled length [m]: {traveled:.3f}",
+        f"Straight-line length [m]: {straight:.3f}",
+        f"Detour detected (>{DEFAULT_DETOUR_RATIO:.2f}x straight): {detour}",
+        f"Minimum pairwise distance during run [m]: {min_pair_distance:.3f}",
+        f"Minimum obstacle clearance during run [m]: {min_obstacle_clearance:.3f}",
+    ]
+    summary_path = save_summary_text(output_path, "fixed_formationMP_metrics.txt", summary_lines)
+    saved_figure_paths = []
 
     if plot:
-        _plot_goal_distance(goal_distance_history)
-        logger.plot()
+        safety_fig = plot_safety_histories(
+            min_pair_distance_history,
+            min_obstacle_clearance_history,
+            title="刚性编队运动原语方法安全距离变化曲线",
+        )
+        traj_3d_fig = plot_3d_trajectories(
+            trajectory_histories=trajectory_histories,
+            nominal_goals=nominal_goals,
+            final_positions=final_positions,
+            obstacle_specs=obstacle_specs,
+            title="刚性编队运动原语方法三维轨迹图",
+        )
+        top_view_fig = plot_top_view_trajectories(
+            trajectory_histories=trajectory_histories,
+            nominal_goals=nominal_goals,
+            final_positions=final_positions,
+            obstacle_specs=obstacle_specs,
+            title="刚性编队运动原语方法俯视轨迹图",
+        )
+        figure_specs = [
+            (safety_fig, output_path / "fixed_formationMP_safety.png"),
+            (traj_3d_fig, output_path / "fixed_formationMP_3d.png"),
+            (top_view_fig, output_path / "fixed_formationMP_top.png"),
+        ]
+        for fig, fig_path in figure_specs:
+            if fig is not None:
+                save_thesis_figure(fig, fig_path)
+                saved_figure_paths.append(fig_path)
+        plt.show()
 
-    print("\n=== Direction-only motion primitives summary ===")
-    print(f"Reached goal (<{DEFAULT_SUCCESS_THRESHOLD:.2f} m): {reached}")
-    print(f"Final leader distance to goal: {final_dist:.3f} m")
-    print(f"Leader traveled length: {traveled:.3f} m (straight line: {straight:.3f} m)")
-    print(f"Detour detected (>{DEFAULT_DETOUR_RATIO:.2f}x straight): {detour}")
-    if not reached:
-        print("Result: failure within time limit is expected in narrow-gap case without shrink factor.")
-    elif detour:
-        print("Result: reached goal but with clear detour due to fixed formation size.")
-    else:
-        print("Result: reached goal with limited detour in this run.")
+    print()
+    for line in summary_lines:
+        print(line)
+    print(f"Saved metrics text: {summary_path}")
+    if saved_figure_paths:
+        print("Saved figures:")
+        for fig_path in saved_figure_paths:
+            print(f"  {fig_path}")
+    if record_video:
+        if gui:
+            print(f"Recorded video saved to: {output_path}")
+        else:
+            print(f"Recorded frames saved to: {output_path}")
 
 
 if __name__ == "__main__":

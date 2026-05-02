@@ -10,9 +10,9 @@ DEFAULT_CAMERA_DISTANCE = 8.4
 DEFAULT_GAP_OBSTACLE = dict(
     center_xy=(0.0, 0.0),
     center_z=1.5,
-    total_length=4.0,
-    total_width=16.0,
-    total_height=3.0,
+    total_length=2,
+    total_width=3.0,
+    total_height=5.0,
     gap_width=1.4,
     yaw_deg=90.0,
     resolution=0.1,
@@ -43,8 +43,23 @@ def _sample_box_surface(half_extents, resolution):
     return np.unique(np.vstack(faces), axis=0)
 
 
-def add_narrow_gap_obstacles(client_id, cfg=DEFAULT_GAP_OBSTACLE, rgba=(0.7, 0.2, 0.2, 0.9)):
-    """Add two fixed blocks with a narrow gap and return obstacle surface points."""
+def _sample_box_volume(half_extents, resolution):
+    """Sample points throughout a box volume with a given resolution."""
+    hx, hy, hz = half_extents
+    xs = np.arange(-hx, hx + resolution * 0.5, resolution)
+    ys = np.arange(-hy, hy + resolution * 0.5, resolution)
+    zs = np.arange(-hz, hz + resolution * 0.5, resolution)
+    xv, yv, zv = np.meshgrid(xs, ys, zs, indexing="xy")
+    return np.column_stack([xv.ravel(), yv.ravel(), zv.ravel()])
+
+
+def add_narrow_gap_obstacles(
+    client_id,
+    cfg=DEFAULT_GAP_OBSTACLE,
+    rgba=(0.7, 0.2, 0.2, 0.9),
+    sample_volume=False,
+):
+    """Add two fixed blocks with a narrow gap and return obstacle point samples."""
     center_xy = cfg["center_xy"]
     center_z = cfg["center_z"]
     total_length = cfg["total_length"]
@@ -84,8 +99,12 @@ def add_narrow_gap_obstacles(client_id, cfg=DEFAULT_GAP_OBSTACLE, rgba=(0.7, 0.2
         ]
     )
 
-    surface_points = []
-    local_surface = _sample_box_surface(half_extents, resolution)
+    obstacle_points = []
+    local_points = (
+        _sample_box_volume(half_extents, resolution)
+        if sample_volume
+        else _sample_box_surface(half_extents, resolution)
+    )
 
     for offset in block_offsets:
         world_center = center + rot @ offset
@@ -108,15 +127,25 @@ def add_narrow_gap_obstacles(client_id, cfg=DEFAULT_GAP_OBSTACLE, rgba=(0.7, 0.2
             physicsClientId=client_id,
         )
 
-        rotated_surface = (rot @ local_surface.T).T + world_center
-        surface_points.append(rotated_surface)
+        rotated_points = (rot @ local_points.T).T + world_center
+        obstacle_points.append(rotated_points)
 
-    return np.vstack(surface_points)
+    return np.vstack(obstacle_points)
 
 
-def build_narrow_gap_kdtree(client_id, cfg=DEFAULT_GAP_OBSTACLE, rgba=(0.7, 0.2, 0.2, 0.9)):
-    """Create narrow-gap obstacles and return (points, kd_tree)."""
-    obstacle_points = add_narrow_gap_obstacles(client_id=client_id, cfg=cfg, rgba=rgba)
+def build_narrow_gap_kdtree(
+    client_id,
+    cfg=DEFAULT_GAP_OBSTACLE,
+    rgba=(0.7, 0.2, 0.2, 0.9),
+    sample_volume=False,
+):
+    """Create narrow-gap obstacles and return sampled obstacle points and a KD-tree."""
+    obstacle_points = add_narrow_gap_obstacles(
+        client_id=client_id,
+        cfg=cfg,
+        rgba=rgba,
+        sample_volume=sample_volume,
+    )
     obstacle_points = np.unique(obstacle_points, axis=0)
     kd_tree = cKDTree(obstacle_points) if obstacle_points.size > 0 else None
     return obstacle_points, kd_tree

@@ -1,0 +1,12 @@
+=== Motion primitives with shrink summary ===
+Reached center goal (<0.40 m): True
+Completion time [s]: 4.062
+Final leader distance to goal [m]: 0.373
+Final goal distances [m]: [0.373 0.62  0.33  0.341]
+Leader traveled length [m]: 5.760
+Straight-line length [m]: 6.000
+Narrow-gap width [m]: 1.400
+Final shrink ratios: [1.003]
+Minimum shrink ratio during run: 0.437
+Minimum pairwise distance during run [m]: 0.316
+Minimum obstacle clearance during run [m]: 0.318

@@ -1,0 +1,11 @@
+=== Fixed formation motion primitives summary ===
+Reached goal (<0.40 m): True
+Completion time [s]: 8.750
+Final leader distance to goal [m]: 0.397
+Final goal distances [m]: [0.397 0.382 0.388 0.393]
+Rigid formation collision radius [m]: 1.280
+Leader traveled length [m]: 10.266
+Straight-line length [m]: 6.000
+Detour detected (>1.15x straight): True
+Minimum pairwise distance during run [m]: 0.786
+Minimum obstacle clearance during run [m]: 0.388
